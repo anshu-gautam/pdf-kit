@@ -9,11 +9,13 @@ description = "pdfkit render: page -> RGBA -> PNG, with a feature-flagged backen
 
 [features]
 default = ["render-native"]
-# Pure-Rust, best-effort render path. Zero native dependencies.
-render-native = []
-# High-fidelity render via PDFium. Native/WASM library bound at runtime.
+# Pure-Rust render path (forwards to pdfkit-core). Zero native dependencies.
+render-native = ["pdfkit-core/render-native"]
+# High-fidelity render via PDFIUM (native/WASM library bound at runtime).
 render-pdfium = []
 
 [dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false }
 
 [dev-dependencies]
+pdfkit-fixtures = { path = "../pdfkit-fixtures" }

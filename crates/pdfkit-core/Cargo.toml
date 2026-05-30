@@ -7,9 +7,17 @@ rust-version.workspace = true
 repository.workspace = true
 description = "pdfkit core: document model, text extraction, page classification, and the extract entry point."
 
+[features]
+default = ["render-native"]
+# Pure-Rust page rendering (page -> RGBA -> PNG) via the `image` crate. Zero
+# native dependencies. The render types/trait are always available; this feature
+# adds the encoder and the NativeRenderer implementation.
+render-native = ["dep:image"]
+
 [dependencies]
 thiserror = { workspace = true }
 lopdf = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg"], optional = true }
 
 [dev-dependencies]
 pdfkit-fixtures = { path = "../pdfkit-fixtures" }

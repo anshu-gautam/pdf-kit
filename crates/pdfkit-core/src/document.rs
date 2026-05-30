@@ -253,6 +253,15 @@ impl Page<'_> {
     }
 }
 
+#[cfg(feature = "render-native")]
+impl Page<'_> {
+    /// Crate-internal handle for the native renderer: the parsed document and
+    /// this page's object id.
+    pub(crate) fn render_handle(&self) -> (&LoDoc, ObjectId) {
+        (&self.doc.inner, self.id)
+    }
+}
+
 fn build_metadata(doc: &LoDoc, page_count: usize) -> Metadata {
     let (title, author) = info_strings(doc);
     Metadata {

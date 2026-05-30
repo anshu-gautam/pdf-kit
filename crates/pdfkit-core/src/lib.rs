@@ -11,9 +11,14 @@
 mod classify;
 mod document;
 mod error;
+mod render;
 mod types;
 
 pub use classify::{PageKind, PageSignals};
 pub use document::{Document, Engine, Metadata, Page};
 pub use error::PdfError;
+pub use render::{Background, Bitmap, RenderOptions, Renderer};
 pub use types::{OpenOptions, PdfInput, TextOptions};
+
+#[cfg(feature = "render-native")]
+pub use render::{encode_png, NativeRenderer};

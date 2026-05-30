@@ -2,7 +2,7 @@
 //! scanned, image-only, or mixed, and expose the raw signals so callers can
 //! retune the thresholds.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use lopdf::content::Content;
 use lopdf::{Document as LoDoc, Object, ObjectId};
@@ -64,32 +64,52 @@ pub(crate) fn classify(signals: &PageSignals) -> PageKind {
     }
 }
 
-/// `(image_count, image_coverage)` for a page: walk the content stream tracking
-/// the CTM, and for every `Do` of an image XObject add the area of the unit
-/// square under the current transform, divided by the page area.
+/// One painting of an image XObject: its stream object id and the CTM in effect
+/// (the six PDF matrix components) when it was drawn.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImageDraw {
+    // `id` is only consumed by the native renderer (decoding the image stream).
+    #[cfg_attr(not(feature = "render-native"), allow(dead_code))]
+    pub id: ObjectId,
+    /// `[a b c d e f]` — the transform mapping the image unit square to user
+    /// space. The drawn area is `|a*d - b*c|`.
+    pub ctm: [f32; 6],
+}
+
+/// `(image_count, image_coverage)` for a page: every image `Do` contributes the
+/// area of its unit square under the CTM, divided by the page area.
 pub(crate) fn image_signals(
     doc: &LoDoc,
     page_id: ObjectId,
     page_w: f32,
     page_h: f32,
 ) -> (usize, f32) {
-    let image_names = image_xobject_names(doc, page_id);
-    if image_names.is_empty() {
-        return (0, 0.0);
+    let draws = image_draws(doc, page_id);
+    let area: f32 = draws
+        .iter()
+        .map(|d| (d.ctm[0] * d.ctm[3] - d.ctm[1] * d.ctm[2]).abs())
+        .sum();
+    let coverage = (area / (page_w * page_h).max(1.0)).clamp(0.0, 1.0);
+    (draws.len(), coverage)
+}
+
+/// Walk a page's content stream, tracking the CTM (`q`/`Q`/`cm`), and record an
+/// [`ImageDraw`] for every `Do` that paints an image XObject.
+pub(crate) fn image_draws(doc: &LoDoc, page_id: ObjectId) -> Vec<ImageDraw> {
+    let images = image_xobjects(doc, page_id);
+    if images.is_empty() {
+        return Vec::new();
     }
-    let content = match doc.get_page_content(page_id) {
-        Ok(c) => c,
-        Err(_) => return (0, 0.0),
+    let Ok(content) = doc.get_page_content(page_id) else {
+        return Vec::new();
     };
-    let parsed = match Content::decode(&content) {
-        Ok(p) => p,
-        Err(_) => return (0, 0.0),
+    let Ok(parsed) = Content::decode(&content) else {
+        return Vec::new();
     };
 
     let mut ctm = Matrix::IDENTITY;
     let mut stack: Vec<Matrix> = Vec::new();
-    let mut image_area = 0.0f32;
-    let mut image_count = 0usize;
+    let mut draws = Vec::new();
 
     for op in &parsed.operations {
         match op.operator.as_str() {
@@ -107,28 +127,26 @@ pub(crate) fn image_signals(
             }
             "Do" => {
                 if let Some(name) = op.operands.first().and_then(|o| o.as_name().ok()) {
-                    if image_names.contains(name) {
-                        image_count += 1;
-                        image_area += ctm.unit_square_area();
+                    if let Some(&id) = images.get(name) {
+                        draws.push(ImageDraw {
+                            id,
+                            ctm: ctm.components(),
+                        });
                     }
                 }
             }
             _ => {}
         }
     }
-
-    let page_area = (page_w * page_h).max(1.0);
-    let coverage = (image_area / page_area).clamp(0.0, 1.0);
-    (image_count, coverage)
+    draws
 }
 
-/// Names of image XObjects available to a page, across the page's own Resources
-/// and any inherited via the parent chain.
-fn image_xobject_names(doc: &LoDoc, page_id: ObjectId) -> HashSet<Vec<u8>> {
-    let mut names = HashSet::new();
-    let (direct, ref_ids) = match doc.get_page_resources(page_id) {
-        Ok(r) => r,
-        Err(_) => return names,
+/// Map of image-XObject name -> stream object id, across the page's own
+/// Resources and any inherited via the parent chain.
+fn image_xobjects(doc: &LoDoc, page_id: ObjectId) -> HashMap<Vec<u8>, ObjectId> {
+    let mut map = HashMap::new();
+    let Ok((direct, ref_ids)) = doc.get_page_resources(page_id) else {
+        return map;
     };
 
     let mut resource_dicts = Vec::new();
@@ -142,25 +160,26 @@ fn image_xobject_names(doc: &LoDoc, page_id: ObjectId) -> HashSet<Vec<u8>> {
     }
 
     for res in resource_dicts {
-        let xobjects = res.get(b"XObject").ok().and_then(|o| deref_dict(doc, o));
-        let Some(xobjects) = xobjects else { continue };
+        let Some(xobjects) = res.get(b"XObject").ok().and_then(|o| deref_dict(doc, o)) else {
+            continue;
+        };
         for (name, value) in xobjects.iter() {
             if let Ok(id) = value.as_reference() {
                 if let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) {
-                    if stream
+                    let is_image = stream
                         .dict
                         .get(b"Subtype")
                         .and_then(Object::as_name)
                         .map(|s| s == b"Image")
-                        .unwrap_or(false)
-                    {
-                        names.insert(name.clone());
+                        .unwrap_or(false);
+                    if is_image {
+                        map.entry(name.clone()).or_insert(id);
                     }
                 }
             }
         }
     }
-    names
+    map
 }
 
 /// Resolve an object that should be a dictionary, following one reference.
@@ -220,8 +239,8 @@ impl Matrix {
         }
     }
 
-    /// Area of the transformed unit square = |det| of the linear part.
-    fn unit_square_area(&self) -> f32 {
-        (self.a * self.d - self.b * self.c).abs()
+    /// The six PDF matrix components `[a b c d e f]`.
+    fn components(&self) -> [f32; 6] {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
     }
 }
