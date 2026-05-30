@@ -116,25 +116,23 @@ struct Block {
     last_y: f32,
 }
 
-/// Group runs into lines by vertical proximity, joining left-to-right.
-fn group_lines(mut runs: Vec<TextRun>) -> Vec<Line> {
-    runs.sort_by(|a, b| {
-        b.bbox[1]
-            .partial_cmp(&a.bbox[1])
-            .unwrap_or(Ordering::Equal)
-            .then(a.bbox[0].partial_cmp(&b.bbox[0]).unwrap_or(Ordering::Equal))
-    });
-
+/// Group runs into lines by vertical proximity, preserving content-stream order
+/// within each line (the reading order), then order lines top-to-bottom.
+///
+/// Sorting by our approximate x positions would interleave runs whose widths
+/// drifted ("emrplo asyees..."); content order avoids that. A space is inserted
+/// only at a real horizontal word gap, so per-glyph PDFs don't become
+/// "Pr i v i l eg ed".
+fn group_lines(runs: Vec<TextRun>) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     for r in runs {
         let y = r.bbox[1];
         let size = r.font_size;
-        if let Some(line) = lines.last_mut() {
-            if (line.y - y).abs() <= line.size.max(size) * 0.5 {
-                // Only insert a space at a real word gap. Many PDFs emit text as
-                // per-glyph runs (kerning via TJ); joining those with a space
-                // mangles words ("Pr i v i l eg ed"). Use the horizontal gap
-                // between the previous run's right edge and this run's left edge.
+        match lines
+            .iter_mut()
+            .find(|l| (l.y - y).abs() <= l.size.max(size) * 0.5)
+        {
+            Some(line) => {
                 let gap = r.bbox[0] - line.x1;
                 let needs_space = !line.text.is_empty()
                     && !line.text.ends_with(' ')
@@ -145,19 +143,19 @@ fn group_lines(mut runs: Vec<TextRun>) -> Vec<Line> {
                 }
                 line.text.push_str(&r.text);
                 line.x0 = line.x0.min(r.bbox[0]);
-                line.x1 = line.x1.max(r.bbox[2]);
+                line.x1 = r.bbox[2];
                 line.size = line.size.max(size);
-                continue;
             }
+            None => lines.push(Line {
+                text: r.text,
+                y,
+                x0: r.bbox[0],
+                x1: r.bbox[2],
+                size,
+            }),
         }
-        lines.push(Line {
-            text: r.text,
-            y,
-            x0: r.bbox[0],
-            x1: r.bbox[2],
-            size,
-        });
     }
+    lines.sort_by(|a, b| b.y.partial_cmp(&a.y).unwrap_or(Ordering::Equal));
     lines
 }
 

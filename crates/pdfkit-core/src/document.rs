@@ -161,9 +161,15 @@ impl Document {
     }
 
     fn extract_page_text(&self, one_based: usize) -> Result<String, PdfError> {
-        self.inner
-            .extract_text(&[one_based as u32])
-            .map_err(PdfError::from)
+        let id = self
+            .page_ids
+            .get(one_based.wrapping_sub(1))
+            .filter(|_| one_based >= 1)
+            .copied()
+            .ok_or(PdfError::PageRange(one_based))?;
+        // Layout-aware reflow (positioned, encoding-correct) rather than lopdf's
+        // fragment-per-operation extract_text, so paragraphs read naturally.
+        Ok(textrun::page_text(&self.inner, id))
     }
 
     /// Look up an attribute on a page, walking `/Parent` for inheritance
