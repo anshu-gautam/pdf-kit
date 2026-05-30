@@ -1,0 +1,16 @@
+[package]
+name = "pdfkit-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Internal: deterministic synthetic PDF fixtures for pdfkit tests (not published)."
+publish = false
+
+[[bin]]
+name = "write-fixtures"
+path = "src/bin/write_fixtures.rs"
+
+[dependencies]
+lopdf = { workspace = true }

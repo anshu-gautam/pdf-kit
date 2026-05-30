@@ -7,3 +7,11 @@
 //! - M1: `Engine`, `Document`, `Page`, `Metadata`, `PdfError`, text extraction.
 //! - M2: page classification.
 //! - M4: the `extract` Auto fallback.
+
+mod document;
+mod error;
+mod types;
+
+pub use document::{Document, Engine, Metadata, Page};
+pub use error::PdfError;
+pub use types::{OpenOptions, PdfInput, TextOptions};

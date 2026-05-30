@@ -9,6 +9,7 @@ members = [
     "crates/pdfkit-adapters",
     "crates/pdfkit-cli",
     "crates/pdfkit-wasm",
+    "crates/pdfkit-fixtures",
 ]
 # `cargo build` / `cargo test` without --workspace operate on these. The wasm
 # crate is excluded from the default set because it targets wasm32; build it
@@ -22,6 +23,7 @@ default-members = [
     "crates/pdfkit-edit",
     "crates/pdfkit-adapters",
     "crates/pdfkit-cli",
+    "crates/pdfkit-fixtures",
 ]
 
 [workspace.package]
@@ -39,7 +41,9 @@ categories = ["text-processing", "multimedia"]
 # dependency in (PRD §2). Heavy / native / networked deps stay behind features.
 [workspace.dependencies]
 thiserror = "2"
-lopdf = { version = "0.36", default-features = false }
+# lopdf 0.40: pure-Rust nom parser is built in (no parser feature flag); we opt
+# out of async (tokio) / embed_image (image) / wasm_js to keep core lean.
+lopdf = { version = "0.40", default-features = false }
 image = { version = "0.25", default-features = false }
 png = "0.17"
 clap = { version = "4", features = ["derive"] }
