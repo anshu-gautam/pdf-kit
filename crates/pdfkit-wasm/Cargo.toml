@@ -10,10 +10,11 @@ description = "pdfkit WebAssembly surface (wasm-bindgen)."
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[features]
-default = []
-wasm = []
-
 [dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false, features = ["render-native", "wasm"] }
+wasm-bindgen = "0.2"
+serde_json = "1"
 
 [dev-dependencies]
+wasm-bindgen-test = "0.3"
+pdfkit-fixtures = { path = "../pdfkit-fixtures" }

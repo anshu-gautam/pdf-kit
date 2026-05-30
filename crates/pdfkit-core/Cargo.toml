@@ -13,6 +13,9 @@ default = ["render-native"]
 # native dependencies. The render types/trait are always available; this feature
 # adds the encoder and the NativeRenderer implementation.
 render-native = ["dep:image"]
+# Browser/WASM target support: route lopdf's RNG (encryption IVs) through the
+# JS crypto backend. A no-op on non-wasm targets.
+wasm = ["lopdf/wasm_js"]
 
 [dependencies]
 thiserror = { workspace = true }
