@@ -885,6 +885,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdfkit"
+version = "0.1.0"
+dependencies = [
+ "pdfkit-adapters",
+ "pdfkit-chunk",
+ "pdfkit-core",
+ "pdfkit-edit",
+ "pdfkit-fixtures",
+ "pdfkit-ocr",
+ "pdfkit-render",
+]
+
+[[package]]
 name = "pdfkit-adapters"
 version = "0.1.0"
 dependencies = [

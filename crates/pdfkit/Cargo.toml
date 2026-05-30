@@ -1,0 +1,37 @@
+[package]
+name = "pdfkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "AI-oriented PDF toolkit: read-first extraction, structured chunks, and a separate edit/create path. Umbrella crate re-exporting the pdfkit-* crates."
+
+[features]
+default = ["render-native", "edit", "chunk", "adapters"]
+# Pure-Rust render path (text types + NativeRenderer + encode_png).
+render-native = ["pdfkit-core/render-native"]
+# High-fidelity PDFIUM render backend.
+render-pdfium = ["dep:pdfkit-render", "pdfkit-render/render-pdfium"]
+# Local ONNX OCR / system Tesseract.
+ocr-ocrs = ["dep:pdfkit-ocr", "pdfkit-ocr/ocr-ocrs"]
+ocr-tesseract = ["dep:pdfkit-ocr", "pdfkit-ocr/ocr-tesseract"]
+# Structured chunking, the write path, and adapters.
+chunk = ["dep:pdfkit-chunk"]
+edit = ["dep:pdfkit-edit"]
+adapters = ["dep:pdfkit-adapters"]
+# Opt-in LLM titling adapter.
+llm-adapter = ["adapters", "pdfkit-adapters/llm-adapter"]
+# Browser/WASM RNG backend.
+wasm = ["pdfkit-core/wasm"]
+
+[dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false }
+pdfkit-render = { path = "../pdfkit-render", default-features = false, optional = true }
+pdfkit-ocr = { path = "../pdfkit-ocr", default-features = false, optional = true }
+pdfkit-chunk = { path = "../pdfkit-chunk", optional = true }
+pdfkit-edit = { path = "../pdfkit-edit", optional = true }
+pdfkit-adapters = { path = "../pdfkit-adapters", optional = true }
+
+[dev-dependencies]
+pdfkit-fixtures = { path = "../pdfkit-fixtures" }

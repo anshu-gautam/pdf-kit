@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/pdfkit",
     "crates/pdfkit-core",
     "crates/pdfkit-render",
     "crates/pdfkit-ocr",
@@ -16,6 +17,7 @@ members = [
 # explicitly with `wasm-pack build crates/pdfkit-wasm`. CI / CLAUDE.md commands
 # pass --workspace explicitly when they want everything.
 default-members = [
+    "crates/pdfkit",
     "crates/pdfkit-core",
     "crates/pdfkit-render",
     "crates/pdfkit-ocr",
