@@ -13,5 +13,7 @@ default = []
 llm-adapter = []
 
 [dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false }
+pdfkit-chunk = { path = "../pdfkit-chunk" }
 
 [dev-dependencies]

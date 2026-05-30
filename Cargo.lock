@@ -413,6 +413,10 @@ dependencies = [
 [[package]]
 name = "pdfkit-adapters"
 version = "0.1.0"
+dependencies = [
+ "pdfkit-chunk",
+ "pdfkit-core",
+]
 
 [[package]]
 name = "pdfkit-chunk"
