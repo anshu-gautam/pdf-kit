@@ -12,6 +12,7 @@ mod classify;
 mod document;
 mod error;
 mod extract;
+mod ocr;
 mod render;
 mod types;
 
@@ -19,8 +20,11 @@ pub use classify::{PageKind, PageSignals};
 pub use document::{Document, Engine, Metadata, Page};
 pub use error::PdfError;
 pub use extract::{extract, ExtractOptions, ExtractResult, Mode, PdfImage, Truncated};
+pub use ocr::{ocr_page, OcrProvider, OcrResult, OcrWord};
 pub use render::{Background, Bitmap, RenderOptions, Renderer};
 pub use types::{OpenOptions, PdfInput, TextOptions};
 
+#[cfg(feature = "render-native")]
+pub use extract::extract_with_ocr;
 #[cfg(feature = "render-native")]
 pub use render::{encode_png, NativeRenderer};

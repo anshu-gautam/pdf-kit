@@ -7,6 +7,11 @@ use crate::error::PdfError;
 use crate::render::RenderOptions;
 use crate::types::{OpenOptions, PdfInput};
 
+#[cfg(feature = "render-native")]
+use crate::classify::PageKind;
+#[cfg(feature = "render-native")]
+use crate::ocr::{ocr_page, OcrProvider};
+
 /// What `extract` should produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -204,6 +209,101 @@ fn extract_auto(
         text,
         images,
         pages_processed: selected.to_vec(),
+        truncated: Truncated {
+            text: truncated_text,
+            images: truncated_images,
+        },
+    })
+}
+
+/// Like [`extract`] in `Auto` mode, but recovers text from scanned/image-only
+/// low-text pages with the supplied OCR `provider` instead of (or before)
+/// rendering them. Pages whose OCR fails, or which aren't scanned/image-only,
+/// fall back to rendered images.
+///
+/// The provider is supplied by the caller (e.g. `pdfkit_ocr::OcrsProvider`),
+/// which keeps the heavy OCR backends out of `pdfkit-core` and avoids a
+/// dependency cycle.
+#[cfg(feature = "render-native")]
+pub fn extract_with_ocr<P>(
+    input: impl Into<PdfInput>,
+    opts: ExtractOptions,
+    provider: &P,
+) -> Result<ExtractResult, PdfError>
+where
+    P: OcrProvider,
+{
+    use crate::render::NativeRenderer;
+
+    let engine = Engine::new()?;
+    let doc = engine.open(
+        input,
+        OpenOptions {
+            password: opts.password.clone(),
+        },
+    )?;
+    let selected = select_pages(doc.page_count(), opts.pages.as_deref(), opts.max_pages)?;
+    let per_page = page_texts(&doc, &selected);
+
+    let total_nonws: usize = per_page
+        .iter()
+        .map(|(_, t)| t.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+
+    // Enough text overall: text only.
+    if total_nonws >= opts.min_text_chars {
+        let (text, truncated_text) = join_capped(&per_page, opts.max_text_chars);
+        return Ok(ExtractResult {
+            text,
+            images: Vec::new(),
+            pages_processed: selected,
+            truncated: Truncated {
+                text: truncated_text,
+                images: false,
+            },
+        });
+    }
+
+    let renderer = NativeRenderer;
+    let mut effective: Vec<(usize, String)> = Vec::with_capacity(per_page.len());
+    let mut to_render: Vec<usize> = Vec::new();
+
+    for (p, layer_text) in &per_page {
+        let has_text =
+            layer_text.chars().filter(|c| !c.is_whitespace()).count() >= opts.min_text_chars;
+        if has_text {
+            effective.push((*p, layer_text.clone()));
+            continue;
+        }
+
+        // Try OCR on scanned / image-only pages.
+        let recovered = if opts.ocr {
+            match doc.page(*p) {
+                Ok(page) if matches!(page.classify(), PageKind::Scanned | PageKind::ImageOnly) => {
+                    ocr_page(&page, &renderer, provider).ok().map(|r| r.text)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        match recovered {
+            Some(text) => effective.push((*p, text)),
+            None => {
+                effective.push((*p, layer_text.clone()));
+                to_render.push(*p);
+            }
+        }
+    }
+
+    let (text, truncated_text) = join_capped(&effective, opts.max_text_chars);
+    let (images, truncated_images) = render_pages(&doc, &to_render, &opts.image);
+
+    Ok(ExtractResult {
+        text,
+        images,
+        pages_processed: selected,
         truncated: Truncated {
             text: truncated_text,
             images: truncated_images,

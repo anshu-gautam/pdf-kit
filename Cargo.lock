@@ -446,6 +446,10 @@ dependencies = [
 [[package]]
 name = "pdfkit-ocr"
 version = "0.1.0"
+dependencies = [
+ "pdfkit-core",
+ "pdfkit-fixtures",
+]
 
 [[package]]
 name = "pdfkit-render"
