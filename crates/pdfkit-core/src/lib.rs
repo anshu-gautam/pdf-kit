@@ -8,10 +8,12 @@
 //! - M2: page classification.
 //! - M4: the `extract` Auto fallback.
 
+mod classify;
 mod document;
 mod error;
 mod types;
 
+pub use classify::{PageKind, PageSignals};
 pub use document::{Document, Engine, Metadata, Page};
 pub use error::PdfError;
 pub use types::{OpenOptions, PdfInput, TextOptions};

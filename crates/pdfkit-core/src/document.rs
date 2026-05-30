@@ -5,6 +5,7 @@
 
 use lopdf::{Dictionary, Document as LoDoc, Object, ObjectId};
 
+use crate::classify::{self, PageKind, PageSignals};
 use crate::error::PdfError;
 use crate::types::{OpenOptions, PdfInput, TextOptions};
 
@@ -228,6 +229,27 @@ impl Page<'_> {
     /// Extract the text on this page from its text layer.
     pub fn text(&self) -> Result<String, PdfError> {
         self.doc.extract_page_text(self.number)
+    }
+
+    /// Raw classification signals for this page (text char count, image count,
+    /// image coverage). Exposed so callers can apply their own thresholds.
+    pub fn signals(&self) -> PageSignals {
+        let text_char_count = self
+            .text()
+            .map(|t| t.chars().filter(|c| !c.is_whitespace()).count())
+            .unwrap_or(0);
+        let (w, h) = self.size_points();
+        let (image_count, image_coverage) = classify::image_signals(&self.doc.inner, self.id, w, h);
+        PageSignals {
+            text_char_count,
+            image_count,
+            image_coverage,
+        }
+    }
+
+    /// Classify this page (text-based / scanned / image-only / mixed).
+    pub fn classify(&self) -> PageKind {
+        classify::classify(&self.signals())
     }
 }
 

@@ -9,8 +9,13 @@
 
 use lopdf::content::{Content, Operation};
 use lopdf::{
-    dictionary, Document, EncryptionState, EncryptionVersion, Object, Permissions, Stream,
+    dictionary, Dictionary, Document, EncryptionState, EncryptionVersion, Object, Permissions,
+    Stream,
 };
+
+/// US Letter page size in points.
+const PAGE_W: i64 = 612;
+const PAGE_H: i64 = 792;
 
 /// The owner/user passwords baked into [`encrypted`] and [`encrypted_default`].
 pub const ENCRYPTED_OWNER_PASSWORD: &str = "owner-secret";
@@ -26,8 +31,27 @@ pub const BORN_DIGITAL_LINES: &[&str] = &[
 
 /// A single-page, born-digital PDF with a real text layer plus Title/Author.
 pub fn born_digital() -> Vec<u8> {
-    let doc = build_text_doc("Born Digital Fixture", "pdfkit", BORN_DIGITAL_LINES);
-    to_bytes(doc)
+    let ops = text_ops(BORN_DIGITAL_LINES);
+    to_bytes(assemble("Born Digital Fixture", "pdfkit", ops, vec![]))
+}
+
+/// A scanned page: one full-page image and no text layer.
+pub fn scanned() -> Vec<u8> {
+    let ops = image_ops("Im0", PAGE_W, PAGE_H, 0, 0);
+    let images = vec![("Im0", gray_image(4, 4))];
+    to_bytes(assemble("Scanned Fixture", "pdfkit", ops, images))
+}
+
+/// A mixed page: a substantial embedded image *and* a real text layer.
+pub fn mixed() -> Vec<u8> {
+    let lines = [
+        "This page mixes a real text layer",
+        "with a large embedded image above it.",
+    ];
+    let mut ops = image_ops("Im0", PAGE_W, 542, 0, 250); // ~68% of the page
+    ops.extend(text_ops(&lines));
+    let images = vec![("Im0", gray_image(4, 4))];
+    to_bytes(assemble("Mixed Fixture", "pdfkit", ops, images))
 }
 
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
@@ -38,11 +62,8 @@ pub fn encrypted_default() -> Vec<u8> {
 
 /// An encrypted PDF using the given owner/user passwords.
 pub fn encrypted(owner: &str, user: &str) -> Vec<u8> {
-    let mut doc = build_text_doc(
-        "Encrypted Fixture",
-        "pdfkit",
-        &["This document is encrypted.", "The secret is safe."],
-    );
+    let ops = text_ops(&["This document is encrypted.", "The secret is safe."]);
+    let mut doc = assemble("Encrypted Fixture", "pdfkit", ops, vec![]);
     let version = EncryptionVersion::V1 {
         document: &doc,
         owner_password: owner,
@@ -54,24 +75,12 @@ pub fn encrypted(owner: &str, user: &str) -> Vec<u8> {
     to_bytes(doc)
 }
 
-/// Build a one-page document that draws `lines` of text and records `title` /
-/// `author` in the information dictionary.
-fn build_text_doc(title: &str, author: &str, lines: &[&str]) -> Document {
-    let mut doc = Document::with_version("1.5");
-
-    // Reserve the Pages node id up front so the page can point at its parent.
-    let pages_id = doc.new_object_id();
-
-    let font_id = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-    });
-    let resources_id = doc.add_object(dictionary! {
-        "Font" => dictionary! { "F1" => font_id },
-    });
-
-    // Content stream: one BT..ET block, absolute first line, then line breaks.
+/// Text-drawing operations: one `BT..ET` block, absolute first line, then line
+/// breaks. Empty when there are no lines.
+fn text_ops(lines: &[&str]) -> Vec<Operation> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
     let mut ops = vec![
         Operation::new("BT", vec![]),
         Operation::new("Tf", vec!["F1".into(), 14_i64.into()]),
@@ -79,24 +88,96 @@ fn build_text_doc(title: &str, author: &str, lines: &[&str]) -> Document {
     ];
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
-            // Move down one line (relative to the previous line origin).
             ops.push(Operation::new("Td", vec![0_i64.into(), (-18_i64).into()]));
         }
         ops.push(Operation::new("Tj", vec![Object::string_literal(*line)]));
     }
     ops.push(Operation::new("ET", vec![]));
+    ops
+}
 
-    let content = Content { operations: ops };
+/// Operations that paint image XObject `name` into the rectangle described by a
+/// `cm` of `[w 0 0 h x y]` (drawn area = w*h points).
+fn image_ops(name: &str, w: i64, h: i64, x: i64, y: i64) -> Vec<Operation> {
+    vec![
+        Operation::new("q", vec![]),
+        Operation::new(
+            "cm",
+            vec![
+                w.into(),
+                0_i64.into(),
+                0_i64.into(),
+                h.into(),
+                x.into(),
+                y.into(),
+            ],
+        ),
+        Operation::new("Do", vec![name.into()]),
+        Operation::new("Q", vec![]),
+    ]
+}
+
+/// A small mid-gray image XObject (`w*h` bytes, DeviceGray, 8 bpc). Pixel size
+/// is irrelevant to coverage — the `cm` transform sets the drawn area.
+fn gray_image(w: i64, h: i64) -> Stream {
+    let data = vec![160u8; (w * h) as usize];
+    Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w,
+            "Height" => h,
+            "ColorSpace" => "DeviceGray",
+            "BitsPerComponent" => 8_i64,
+        },
+        data,
+    )
+}
+
+/// Assemble a one-page document from content operations and named image
+/// XObjects, recording Title/Author and a fixed document /ID.
+fn assemble(
+    title: &str,
+    author: &str,
+    ops: Vec<Operation>,
+    images: Vec<(&str, Stream)>,
+) -> Document {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+
+    let has_images = !images.is_empty();
+    let mut xobjects = Dictionary::new();
+    for (name, stream) in images {
+        let id = doc.add_object(stream);
+        xobjects.set(name, id);
+    }
+
+    let mut resources = dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    };
+    if has_images {
+        resources.set("XObject", xobjects);
+    }
+    let resources_id = doc.add_object(resources);
+
     let content_id = doc.add_object(Stream::new(
         dictionary! {},
-        content.encode().expect("encode content stream"),
+        Content { operations: ops }
+            .encode()
+            .expect("encode content stream"),
     ));
 
     let page_id = doc.add_object(dictionary! {
         "Type" => "Page",
         "Parent" => pages_id,
         "Contents" => content_id,
-        "MediaBox" => vec![0_i64.into(), 0_i64.into(), 612_i64.into(), 792_i64.into()],
+        "MediaBox" => vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()],
     });
 
     let pages = dictionary! {
@@ -119,8 +200,6 @@ fn build_text_doc(title: &str, author: &str, lines: &[&str]) -> Document {
     });
     doc.trailer.set("Info", info_id);
 
-    // A document /ID (two 16-byte strings) is required by the encryption
-    // handler and is good practice generally. Keep it fixed for determinism.
     let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
     doc.trailer
         .set("ID", Object::Array(vec![file_id.clone(), file_id]));

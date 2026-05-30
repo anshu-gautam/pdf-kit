@@ -15,6 +15,8 @@ fn main() -> std::io::Result<()> {
 
     let outputs: &[(&str, Vec<u8>)] = &[
         ("born-digital.pdf", pdfkit_fixtures::born_digital()),
+        ("scanned.pdf", pdfkit_fixtures::scanned()),
+        ("mixed.pdf", pdfkit_fixtures::mixed()),
         ("encrypted.pdf", pdfkit_fixtures::encrypted_default()),
     ];
 
