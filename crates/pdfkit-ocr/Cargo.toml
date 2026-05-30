@@ -1,0 +1,19 @@
+[package]
+name = "pdfkit-ocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit OCR: rasterize + recognize scanned pages. Local ONNX (ocrs) or system Tesseract."
+
+[features]
+default = []
+# Local, pure-Rust ONNX OCR via ocrs + rten. Models downloaded to a cache dir.
+ocr-ocrs = []
+# Tesseract OCR. Requires a system Tesseract library; never in the default build.
+ocr-tesseract = []
+
+[dependencies]
+
+[dev-dependencies]

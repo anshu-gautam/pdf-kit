@@ -1,0 +1,19 @@
+[package]
+name = "pdfkit-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit WebAssembly surface (wasm-bindgen)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = []
+
+[dependencies]
+
+[dev-dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "pdfkit-chunk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit chunking: structured/RAG chunks with page, bbox, kind, and heading path."
+
+[dependencies]
+
+[dev-dependencies]

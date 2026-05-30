@@ -1,0 +1,17 @@
+[package]
+name = "pdfkit-adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit adapters: message content blocks, data URLs, and an opt-in LLM adapter."
+
+[features]
+default = []
+# The ONLY place a model is invoked. Caller supplies the client; no default one.
+llm-adapter = []
+
+[dependencies]
+
+[dev-dependencies]

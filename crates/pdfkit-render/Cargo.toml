@@ -1,0 +1,19 @@
+[package]
+name = "pdfkit-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit render: page -> RGBA -> PNG, with a feature-flagged backend and a pixel budget."
+
+[features]
+default = ["render-native"]
+# Pure-Rust, best-effort render path. Zero native dependencies.
+render-native = []
+# High-fidelity render via PDFium. Native/WASM library bound at runtime.
+render-pdfium = []
+
+[dependencies]
+
+[dev-dependencies]

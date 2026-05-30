@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local OCR model cache (downloaded by setup script, never vendored — CLAUDE.md)
+/.cache/
+/models/
+
+# wasm-pack output
+/crates/pdfkit-wasm/pkg/

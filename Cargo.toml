@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pdfkit-core",
+    "crates/pdfkit-render",
+    "crates/pdfkit-ocr",
+    "crates/pdfkit-chunk",
+    "crates/pdfkit-edit",
+    "crates/pdfkit-adapters",
+    "crates/pdfkit-cli",
+    "crates/pdfkit-wasm",
+]
+# `cargo build` / `cargo test` without --workspace operate on these. The wasm
+# crate is excluded from the default set because it targets wasm32; build it
+# explicitly with `wasm-pack build crates/pdfkit-wasm`. CI / CLAUDE.md commands
+# pass --workspace explicitly when they want everything.
+default-members = [
+    "crates/pdfkit-core",
+    "crates/pdfkit-render",
+    "crates/pdfkit-ocr",
+    "crates/pdfkit-chunk",
+    "crates/pdfkit-edit",
+    "crates/pdfkit-adapters",
+    "crates/pdfkit-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.82"
+repository = "https://github.com/equitylist/pdfkit"
+description = "A from-scratch, AI-oriented PDF toolkit in Rust: read-first extraction, structured chunk output, and a separate edit/create path."
+keywords = ["pdf", "ocr", "extraction", "text", "rag"]
+categories = ["text-processing", "multimedia"]
+
+# Central version pins. Members opt in with `dep = { workspace = true }`.
+# Versions are filled in / verified via `cargo add` as each milestone wires the
+# dependency in (PRD §2). Heavy / native / networked deps stay behind features.
+[workspace.dependencies]
+thiserror = "2"
+lopdf = { version = "0.36", default-features = false }
+image = { version = "0.25", default-features = false }
+png = "0.17"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+
+# Build profiles: keep dev builds quick, release lean.
+[profile.release]
+opt-level = 3
+lto = "thin"

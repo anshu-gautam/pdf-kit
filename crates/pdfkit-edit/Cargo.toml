@@ -1,0 +1,12 @@
+[package]
+name = "pdfkit-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit edit: create, merge, split, rotate, watermark, and fill forms. The write path."
+
+[dependencies]
+
+[dev-dependencies]
