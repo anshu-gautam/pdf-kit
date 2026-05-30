@@ -3,15 +3,19 @@
 //!
 //! Walks a page's content stream tracking the graphics CTM and text state (font,
 //! size, text matrix, leading) and emits a [`TextRun`] per show-text operator
-//! with an approximate bounding box and effective font size. Text bytes are
-//! decoded with the active font's encoding (via lopdf), matching lopdf's
-//! `extract_text` decoding while preserving position — so chunking and the
-//! reflowed text output get correct glyphs *and* correct layout.
+//! with a bounding box and effective font size. Two refinements make the output
+//! match the source document:
+//! - bytes are decoded with the active font's encoding (via lopdf), matching
+//!   lopdf's `extract_text` glyph decoding while preserving position;
+//! - glyph advances come from the font's `/Widths` metrics (simple fonts) rather
+//!   than a fixed estimate, so word gaps — and therefore inserted spaces — are
+//!   accurate. Composite (Type0) fonts and fonts without `/Widths` fall back to
+//!   a 0.5-em estimate.
 
 use std::collections::BTreeMap;
 
 use lopdf::content::Content;
-use lopdf::{Document as LoDoc, Encoding, Object, ObjectId};
+use lopdf::{Dictionary, Document as LoDoc, Encoding, Object, ObjectId};
 
 use crate::geometry::Matrix;
 
@@ -27,12 +31,35 @@ pub struct TextRun {
     pub font_size: f32,
 }
 
-/// Approximate advance width per character, as a fraction of the font size.
-const AVG_GLYPH_WIDTH: f32 = 0.5;
+/// Fallback advance per glyph, in 1/1000 em, when font metrics are unavailable.
+const DEFAULT_ADVANCE: f32 = 500.0;
+
+/// Per-font glyph widths for a simple (single-byte) font, in 1/1000 em.
+struct FontMetrics {
+    first_char: i64,
+    widths: Vec<f32>,
+    default_width: f32,
+}
+
+impl FontMetrics {
+    /// Advance width (1/1000 em) for a one-byte character code.
+    fn width(&self, code: i64) -> f32 {
+        if code >= self.first_char {
+            let idx = (code - self.first_char) as usize;
+            if let Some(&w) = self.widths.get(idx) {
+                if w > 0.0 {
+                    return w;
+                }
+            }
+        }
+        self.default_width
+    }
+}
 
 /// Extract positioned text runs from a page's content stream.
 pub(crate) fn page_text_runs(doc: &LoDoc, page_id: ObjectId) -> Vec<TextRun> {
     let encodings = font_encodings(doc, page_id);
+    let metrics = font_metrics(doc, page_id);
 
     let Ok(content) = doc.get_page_content(page_id) else {
         return Vec::new();
@@ -49,6 +76,7 @@ pub(crate) fn page_text_runs(doc: &LoDoc, page_id: ObjectId) -> Vec<TextRun> {
     let mut font_size = 0.0f32;
     let mut leading = 0.0f32;
     let mut encoding: Option<&Encoding> = None;
+    let mut font: Option<&FontMetrics> = None;
 
     for op in &parsed.operations {
         let ops = &op.operands;
@@ -72,10 +100,9 @@ pub(crate) fn page_text_runs(doc: &LoDoc, page_id: ObjectId) -> Vec<TextRun> {
                 if let Some(sz) = ops.get(1).and_then(|o| o.as_float().ok()) {
                     font_size = sz;
                 }
-                encoding = ops
-                    .first()
-                    .and_then(|o| o.as_name().ok())
-                    .and_then(|name| encodings.get(name));
+                let name = ops.first().and_then(|o| o.as_name().ok());
+                encoding = name.and_then(|n| encodings.get(n));
+                font = name.and_then(|n| metrics.get(n));
             }
             "TL" => {
                 if let Some(l) = ops.first().and_then(|o| o.as_float().ok()) {
@@ -107,39 +134,21 @@ pub(crate) fn page_text_runs(doc: &LoDoc, page_id: ObjectId) -> Vec<TextRun> {
             }
             "Tj" => {
                 if let Some(bytes) = ops.first().and_then(|o| o.as_str().ok()) {
-                    emit(
-                        &decode(encoding, bytes),
-                        font_size,
-                        &ctm,
-                        &mut tm,
-                        &mut runs,
-                    );
+                    show_run(bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs);
                 }
             }
             "'" => {
                 tlm = Matrix::translation(0.0, -leading).multiply(&tlm);
                 tm = tlm;
                 if let Some(bytes) = ops.first().and_then(|o| o.as_str().ok()) {
-                    emit(
-                        &decode(encoding, bytes),
-                        font_size,
-                        &ctm,
-                        &mut tm,
-                        &mut runs,
-                    );
+                    show_run(bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs);
                 }
             }
             "\"" => {
                 tlm = Matrix::translation(0.0, -leading).multiply(&tlm);
                 tm = tlm;
                 if let Some(bytes) = ops.get(2).and_then(|o| o.as_str().ok()) {
-                    emit(
-                        &decode(encoding, bytes),
-                        font_size,
-                        &ctm,
-                        &mut tm,
-                        &mut runs,
-                    );
+                    show_run(bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs);
                 }
             }
             "TJ" => {
@@ -147,12 +156,8 @@ pub(crate) fn page_text_runs(doc: &LoDoc, page_id: ObjectId) -> Vec<TextRun> {
                     for item in items {
                         match item {
                             Object::String(bytes, _) => {
-                                emit(
-                                    &decode(encoding, bytes),
-                                    font_size,
-                                    &ctm,
-                                    &mut tm,
-                                    &mut runs,
+                                show_run(
+                                    bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs,
                                 );
                             }
                             other => {
@@ -184,6 +189,68 @@ fn font_encodings(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, Encoding<
     map
 }
 
+/// Build a map of font resource name -> glyph-width metrics for the page's
+/// *simple* fonts (those with a `/Widths` array). Composite/metric-less fonts
+/// are omitted and fall back to the estimate.
+fn font_metrics(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, FontMetrics> {
+    let mut map = BTreeMap::new();
+    let Ok(fonts) = doc.get_page_fonts(page_id) else {
+        return map;
+    };
+    for (name, font) in fonts {
+        let is_type0 = font
+            .get(b"Subtype")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .map(|s| s == b"Type0")
+            .unwrap_or(false);
+        if is_type0 {
+            continue; // composite fonts use 2-byte codes; estimate instead
+        }
+        let widths: Vec<f32> = deref_array(doc, font.get(b"Widths").ok())
+            .map(|arr| arr.iter().filter_map(|o| o.as_float().ok()).collect())
+            .unwrap_or_default();
+        if widths.is_empty() {
+            continue; // e.g. base-14 fonts with built-in metrics
+        }
+        let first_char = font
+            .get(b"FirstChar")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(0);
+        let default_width = font
+            .get(b"FontDescriptor")
+            .ok()
+            .and_then(|o| deref_dict(doc, o))
+            .and_then(|d| d.get(b"MissingWidth").ok())
+            .and_then(|o| o.as_float().ok())
+            .unwrap_or(DEFAULT_ADVANCE);
+        map.insert(
+            name,
+            FontMetrics {
+                first_char,
+                widths,
+                default_width,
+            },
+        );
+    }
+    map
+}
+
+fn deref_array<'a>(doc: &'a LoDoc, obj: Option<&'a Object>) -> Option<&'a Vec<Object>> {
+    match obj? {
+        Object::Reference(id) => doc.get_object(*id).ok()?.as_array().ok(),
+        other => other.as_array().ok(),
+    }
+}
+
+fn deref_dict<'a>(doc: &'a LoDoc, obj: &'a Object) -> Option<&'a Dictionary> {
+    match obj {
+        Object::Reference(id) => doc.get_dictionary(*id).ok(),
+        other => other.as_dict().ok(),
+    }
+}
+
 /// Decode a show-text byte string with the active font encoding, falling back to
 /// Latin-1 when no encoding is known or decoding fails.
 fn decode(encoding: Option<&Encoding>, bytes: &[u8]) -> String {
@@ -201,13 +268,28 @@ fn num(ops: &[Object], i: usize) -> Option<f32> {
     ops.get(i).and_then(|o| o.as_float().ok())
 }
 
-/// Emit a run for already-decoded `text` at the current text matrix, then
-/// advance the matrix by the run's approximate width.
-fn emit(text: &str, font_size: f32, ctm: &Matrix, tm: &mut Matrix, runs: &mut Vec<TextRun>) {
-    let char_count = text.chars().count();
-    if char_count == 0 {
+/// Emit a run for a show-text byte string: decode it, advance the text matrix by
+/// the glyphs' real (or estimated) widths.
+fn show_run(
+    bytes: &[u8],
+    encoding: Option<&Encoding>,
+    font: Option<&FontMetrics>,
+    font_size: f32,
+    ctm: &Matrix,
+    tm: &mut Matrix,
+    runs: &mut Vec<TextRun>,
+) {
+    let text = decode(encoding, bytes);
+    if text.is_empty() {
         return;
     }
+
+    // Advance in 1/1000 em: real per-code widths for simple fonts, else estimate.
+    let advance_units: f32 = match font {
+        Some(metrics) => bytes.iter().map(|&b| metrics.width(b as i64)).sum(),
+        None => text.chars().count() as f32 * DEFAULT_ADVANCE,
+    };
+    let width_text = advance_units / 1000.0 * font_size;
 
     let combined = tm.multiply(ctm);
     let x0 = combined.e;
@@ -217,11 +299,10 @@ fn emit(text: &str, font_size: f32, ctm: &Matrix, tm: &mut Matrix, runs: &mut Ve
     } else {
         combined.vertical_scale()
     };
-    let width_text = char_count as f32 * font_size * AVG_GLYPH_WIDTH;
     let width_user = width_text * combined.horizontal_scale();
 
     runs.push(TextRun {
-        text: text.to_string(),
+        text,
         bbox: [x0, y0, x0 + width_user, y0 + effective_size],
         font_size: effective_size,
     });
@@ -247,8 +328,8 @@ fn reflow(runs: Vec<TextRun>) -> String {
     use std::cmp::Ordering;
 
     // Bucket runs into lines by vertical position, *preserving content-stream
-    // order within each line* (that is the reading order; sorting by our
-    // approximate x positions would interleave runs whose widths drifted).
+    // order within each line* (that is the reading order; sorting by x would
+    // interleave runs whose positions drifted).
     let mut lines: Vec<LineAcc> = Vec::new();
     for r in runs {
         let (x0, y, x1) = (r.bbox[0], r.bbox[1], r.bbox[2]);
@@ -279,7 +360,6 @@ fn reflow(runs: Vec<TextRun>) -> String {
         }
     }
 
-    // Order lines top-to-bottom for output.
     lines.sort_by(|a, b| b.y.partial_cmp(&a.y).unwrap_or(Ordering::Equal));
 
     let mut out = String::new();
@@ -287,7 +367,6 @@ fn reflow(runs: Vec<TextRun>) -> String {
     for line in &lines {
         if let Some(py) = prev_y {
             out.push('\n');
-            // A large vertical gap is a paragraph break -> blank line.
             if py - line.y > line.size * 1.8 {
                 out.push('\n');
             }
