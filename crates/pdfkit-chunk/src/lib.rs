@@ -46,7 +46,9 @@ pub struct Chunk {
 pub struct ChunkOptions {
     /// Target size per chunk, in tokens.
     pub target_tokens: usize,
-    /// Token overlap between adjacent chunks (0 = none).
+    /// Token overlap carried from the end of one chunk into the next when a
+    /// section is split purely by the token budget (0 = none). A value around
+    /// 10–15% of `target_tokens` is a common RAG recommendation.
     pub overlap_tokens: usize,
     /// Never split a block across chunks.
     pub respect_boundaries: bool,
@@ -225,6 +227,28 @@ fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4).max(1)
 }
 
+/// The trailing ~`tokens` tokens of `text`, snapped to a word boundary. Used to
+/// carry overlap context into the next chunk.
+fn tail_tokens(text: &str, tokens: usize) -> String {
+    let max_chars = tokens.saturating_mul(4);
+    if text.chars().count() <= max_chars {
+        return text.trim().to_string();
+    }
+    let start = text
+        .char_indices()
+        .rev()
+        .take(max_chars)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let tail = &text[start..];
+    // Drop a leading partial word so overlap begins on a whole word.
+    match tail.find(char::is_whitespace) {
+        Some(i) => tail[i..].trim().to_string(),
+        None => tail.trim().to_string(),
+    }
+}
+
 /// Union two bounding boxes.
 fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [
@@ -289,14 +313,26 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
         let path: Vec<String> = stack.iter().map(|(_, t)| t.clone()).collect();
         let block_tokens = estimate_tokens(&block.text);
 
-        let must_flush = current.as_ref().is_some_and(|c| {
-            c.page != block.page
-                || c.heading_path != path
-                || c.tokens + block_tokens > opts.target_tokens
-        });
+        // Decide whether to flush the current chunk, and whether the next chunk
+        // is a *continuation* (same page + heading) split purely by the token
+        // budget — only then do we carry overlap context across the boundary.
+        let (must_flush, continuation, over_budget) = match current.as_ref() {
+            Some(c) => {
+                let over = c.tokens + block_tokens > opts.target_tokens;
+                let same = c.page == block.page && c.heading_path == path;
+                (c.page != block.page || c.heading_path != path || over, same, over)
+            }
+            None => (false, false, false),
+        };
+
+        let mut overlap_seed: Option<String> = None;
         if must_flush {
             if let Some(acc) = current.take() {
-                chunks.push(acc.finish());
+                let finished = acc.finish();
+                if opts.overlap_tokens > 0 && continuation && over_budget {
+                    overlap_seed = Some(tail_tokens(&finished.text, opts.overlap_tokens));
+                }
+                chunks.push(finished);
             }
         }
 
@@ -308,9 +344,17 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                 c.bbox = union(c.bbox, block.bbox);
             }
             None => {
+                let (text, tokens) = match overlap_seed {
+                    Some(seed) if !seed.is_empty() => {
+                        let text = format!("{seed}\n{}", block.text);
+                        let tokens = estimate_tokens(&text);
+                        (text, tokens)
+                    }
+                    _ => (block.text, block_tokens),
+                };
                 current = Some(Acc {
-                    text: block.text,
-                    tokens: block_tokens,
+                    text,
+                    tokens,
                     page: block.page,
                     kind: block.kind,
                     heading_path: path,

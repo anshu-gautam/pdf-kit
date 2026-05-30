@@ -82,6 +82,43 @@ fn separate_blocks_pack_together_under_target() {
 }
 
 #[test]
+fn overlap_carries_context_across_a_split() {
+    // Tiny target splits Gamma and Delta (separate blocks, same chapter); with
+    // overlap, the Delta chunk should begin with the tail of the Gamma chunk.
+    let opts = ChunkOptions {
+        target_tokens: 8,
+        overlap_tokens: 5,
+        ..Default::default()
+    };
+    let chunks = chunks_of(pdfkit_fixtures::multi_heading(), &opts);
+    let delta = chunks
+        .iter()
+        .find(|c| c.text.contains("Delta paragraph"))
+        .expect("delta chunk");
+    // Gamma ends "...second chapter heading now." -> overlap brings "heading"/"now".
+    assert!(
+        delta.text.contains("heading") || delta.text.contains("now"),
+        "expected overlap context from Gamma in: {:?}",
+        delta.text
+    );
+
+    // Without overlap, the Delta chunk does not contain Gamma's tail.
+    let no_overlap = chunks_of(
+        pdfkit_fixtures::multi_heading(),
+        &ChunkOptions {
+            target_tokens: 8,
+            overlap_tokens: 0,
+            ..Default::default()
+        },
+    );
+    let delta0 = no_overlap
+        .iter()
+        .find(|c| c.text.contains("Delta paragraph"))
+        .expect("delta chunk");
+    assert!(!delta0.text.contains("Gamma"));
+}
+
+#[test]
 fn small_target_keeps_blocks_separate() {
     let opts = ChunkOptions {
         target_tokens: 8,
