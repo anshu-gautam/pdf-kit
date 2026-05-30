@@ -11,8 +11,14 @@ description = "pdfkit command-line interface."
 name = "pdfkit"
 path = "src/main.rs"
 
+[features]
+default = []
+# High-fidelity page rendering via PDFIUM (forwards to pdfkit-render).
+render-pdfium = ["pdfkit-render/render-pdfium"]
+
 [dependencies]
 pdfkit-core = { path = "../pdfkit-core" }
+pdfkit-render = { path = "../pdfkit-render" }
 clap = { workspace = true }
 serde_json = "1"
 

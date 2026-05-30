@@ -11,11 +11,15 @@ description = "pdfkit render: page -> RGBA -> PNG, with a feature-flagged backen
 default = ["render-native"]
 # Pure-Rust render path (forwards to pdfkit-core). Zero native dependencies.
 render-native = ["pdfkit-core/render-native"]
-# High-fidelity render via PDFIUM (native/WASM library bound at runtime).
-render-pdfium = []
+# High-fidelity render via PDFIUM (native library bound at runtime).
+render-pdfium = ["dep:pdfium-render"]
 
 [dependencies]
 pdfkit-core = { path = "../pdfkit-core", default-features = false }
+# Default features give pdfium_latest + image_025 + thread_safe. The PDFIUM
+# library itself is bound at runtime (not statically linked); we read pixels via
+# PdfBitmap::as_rgba_bytes so we don't touch the image crate here.
+pdfium-render = { version = "0.9", optional = true }
 
 [dev-dependencies]
 pdfkit-fixtures = { path = "../pdfkit-fixtures" }

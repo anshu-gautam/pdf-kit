@@ -10,11 +10,22 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use pdfkit_core::{
     encode_png, extract, Engine, ExtractOptions, Mode, NativeRenderer, OpenOptions, PdfError,
     PdfInput, RenderOptions, Renderer,
 };
+
+/// Which rendering backend to use for `render`.
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum Backend {
+    /// Use PDFIUM if available (and compiled in), else the native path.
+    Auto,
+    /// Pure-Rust path: sizes the page and composites raster images only.
+    Native,
+    /// High-fidelity PDFIUM (renders text + vector); needs the render-pdfium build.
+    Pdfium,
+}
 
 /// AI-oriented PDF toolkit: read-first extraction, with a separate render path.
 #[derive(Parser, Debug)]
@@ -65,6 +76,10 @@ struct RenderArgs {
     /// Render resolution in DPI.
     #[arg(long)]
     dpi: Option<f32>,
+
+    /// Rendering backend.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    backend: Backend,
 
     /// Password for an encrypted document.
     #[arg(long)]
@@ -211,19 +226,14 @@ fn run_extract(file: &str, cli: &Cli) -> Result<(), CliError> {
 }
 
 fn run_render(args: RenderArgs) -> Result<(), CliError> {
-    let input = read_input(&args.file)?;
+    let bytes = read_bytes(&args.file)?;
     let password = resolve_password(&args.password, &args.password_file)?;
-
-    let engine = Engine::new()?;
-    let doc = engine.open(input, OpenOptions { password })?;
-    let page = doc.page(args.page)?;
-
     let opts = RenderOptions {
         dpi: args.dpi,
         ..RenderOptions::default()
     };
-    let bitmap = NativeRenderer.render(&page, &opts)?;
-    let png = encode_png(&bitmap, true)?;
+
+    let png = render_to_png(&bytes, args.page, password.as_deref(), &opts, args.backend)?;
 
     match args.out {
         Some(path) => fs::write(&path, &png)?,
@@ -233,4 +243,62 @@ fn run_render(args: RenderArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// Read the whole document into memory (PDFIUM and the native fallback both want
+/// bytes; `-` reads stdin).
+fn read_bytes(file: &str) -> Result<Vec<u8>, CliError> {
+    if file == "-" {
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf)?;
+        Ok(buf)
+    } else {
+        Ok(fs::read(file)?)
+    }
+}
+
+/// Render a page to PNG with the chosen backend.
+fn render_to_png(
+    bytes: &[u8],
+    page: usize,
+    password: Option<&str>,
+    opts: &RenderOptions,
+    backend: Backend,
+) -> Result<Vec<u8>, CliError> {
+    let want_pdfium = match backend {
+        Backend::Native => false,
+        Backend::Pdfium => true,
+        Backend::Auto => cfg!(feature = "render-pdfium"),
+    };
+
+    if want_pdfium {
+        #[cfg(feature = "render-pdfium")]
+        {
+            match pdfkit_render::PdfiumRenderer::new() {
+                Ok(renderer) => {
+                    let bitmap = renderer.render_page(bytes, page, password, opts)?;
+                    return Ok(encode_png(&bitmap, true)?);
+                }
+                Err(e) if backend == Backend::Pdfium => return Err(CliError::Pdf(e)),
+                Err(e) => eprintln!("pdfkit: PDFIUM unavailable ({e}); falling back to native"),
+            }
+        }
+        #[cfg(not(feature = "render-pdfium"))]
+        if backend == Backend::Pdfium {
+            return Err(CliError::Usage(
+                "this build has no PDFIUM backend; rebuild with --features render-pdfium".into(),
+            ));
+        }
+    }
+
+    // Native fallback (pure-Rust: background + composited raster images).
+    let doc = Engine::new()?.open(
+        bytes.to_vec(),
+        OpenOptions {
+            password: password.map(str::to_string),
+        },
+    )?;
+    let view = doc.page(page)?;
+    let bitmap = NativeRenderer.render(&view, opts)?;
+    Ok(encode_png(&bitmap, true)?)
 }

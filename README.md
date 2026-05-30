@@ -56,11 +56,28 @@ pdfkit secret.pdf --password-file ./pass.txt
 # Read from stdin
 cat document.pdf | pdfkit -
 
-# Render a page to PNG
+# Render a page to PNG (pure-Rust native backend; rasterizes embedded images,
+# not vector/text)
 pdfkit render document.pdf --page 1 -o page1.png --dpi 200
+
+# Faithful rendering of text/vector pages needs the PDFIUM backend:
+scripts/fetch-pdfium.sh   # one-time: download libpdfium into ~/.cache/pdfkit
+cargo build --release -p pdfkit-cli --features render-pdfium
+pdfkit render document.pdf --page 1 --backend pdfium -o page1.png --dpi 200
 ```
 
 Exit codes: `0` success, `2` usage error, `3` wrong/missing password, `1` other.
+
+### Rendering backends
+
+| `--backend` | Needs | Renders |
+| --- | --- | --- |
+| `native` (default build) | nothing (pure Rust) | page background + embedded raster images (great for scans; **blank for vector/text pages**) |
+| `pdfium` | `--features render-pdfium` + `scripts/fetch-pdfium.sh` | full fidelity — text, vector, and images |
+| `auto` | — | PDFIUM when compiled in and available, else native |
+
+PDFIUM is located at runtime via `$PDFKIT_PDFIUM_LIB`, then
+`~/.cache/pdfkit/pdfium/lib/`, then the system library path.
 
 ## Quick start (library)
 
@@ -157,8 +174,10 @@ cargo run -p pdfkit-fixtures --bin write-fixtures                       # regene
 
 - The default and `render-native` builds use only MIT/Apache-2.0 pure-Rust
   dependencies (lopdf, image, png, thiserror, clap).
-- `render-pdfium` binds a PDFIUM library at runtime; it is **not** vendored. When
-  shipping a PDFIUM build, record its release tag and WASM `sha256` here.
+- `render-pdfium` binds a PDFIUM library at runtime via `pdfium-render` 0.9; the
+  library is **not** vendored. `scripts/fetch-pdfium.sh` downloads it from
+  [`bblanchon/pdfium-binaries`](https://github.com/bblanchon/pdfium-binaries)
+  (verified against tag `chromium/7857`, mac-arm64) into `~/.cache/pdfkit`.
 - `ocr-ocrs` downloads ONNX `.rten` models via the setup script; they are not
   vendored.
 

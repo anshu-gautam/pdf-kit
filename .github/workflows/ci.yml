@@ -53,6 +53,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --no-default-features --features render-native
 
+  render-pdfium:
+    name: render-pdfium build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The PDFIUM library binds at runtime, so this only proves the backend
+      # compiles; rendering with it requires scripts/fetch-pdfium.sh.
+      - run: cargo build -p pdfkit-render -p pdfkit-cli --features render-pdfium
+
   wasm-build:
     name: wasm build + test
     runs-on: ubuntu-latest
