@@ -107,6 +107,8 @@ struct Line {
     x0: f32,
     x1: f32,
     size: f32,
+    /// Number of wide horizontal gaps (column separators) on this line.
+    columns: usize,
 }
 
 struct Block {
@@ -116,7 +118,14 @@ struct Block {
     size: f32,
     kind: ElementKind,
     last_y: f32,
+    /// Lines in the block, and how many looked tabular (had a column gap).
+    lines: usize,
+    tabular_lines: usize,
 }
+
+/// A gap wider than this many times the font size is treated as a table column
+/// separator rather than a word space.
+const COLUMN_GAP: f32 = 4.0;
 
 /// Group runs into lines by vertical proximity, preserving content-stream order
 /// within each line (the reading order), then order lines top-to-bottom.
@@ -136,11 +145,16 @@ fn group_lines(runs: Vec<TextRun>) -> Vec<Line> {
         {
             Some(line) => {
                 let gap = r.bbox[0] - line.x1;
-                let needs_space = !line.text.is_empty()
-                    && !line.text.ends_with(' ')
+                let unit = line.size.max(size);
+                if gap > unit * COLUMN_GAP {
+                    // Wide gap = column separator: delimit with a tab and count it.
+                    line.text.push('\t');
+                    line.columns += 1;
+                } else if !line.text.is_empty()
+                    && !line.text.ends_with([' ', '\t'])
                     && !r.text.starts_with(' ')
-                    && gap > line.size.max(size) * 0.25;
-                if needs_space {
+                    && gap > unit * 0.25
+                {
                     line.text.push(' ');
                 }
                 line.text.push_str(&r.text);
@@ -154,6 +168,7 @@ fn group_lines(runs: Vec<TextRun>) -> Vec<Line> {
                 x0: r.bbox[0],
                 x1: r.bbox[2],
                 size,
+                columns: 0,
             }),
         }
     }
@@ -184,6 +199,8 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
                 b.bbox[2] = b.bbox[2].max(line.x1);
                 b.bbox[3] = b.bbox[3].max(line.y + line.size);
                 b.last_y = line.y;
+                b.lines += 1;
+                b.tabular_lines += usize::from(line.columns >= 1);
             }
         } else {
             let kind = if is_heading {
@@ -198,10 +215,40 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
                 size: line.size,
                 kind,
                 last_y: line.y,
+                lines: 1,
+                tabular_lines: usize::from(line.columns >= 1),
             });
         }
     }
+
+    // Promote multi-row tabular blocks to Table, and figure/table captions to
+    // Caption (headings are left untouched).
+    for block in &mut blocks {
+        if block.kind == ElementKind::Heading {
+            continue;
+        }
+        if block.tabular_lines >= 2 && block.tabular_lines * 2 >= block.lines {
+            block.kind = ElementKind::Table;
+        } else if is_caption(&block.text) {
+            block.kind = ElementKind::Caption;
+        }
+    }
     blocks
+}
+
+/// A short block beginning "Figure/Fig./Table/Exhibit/Chart/Diagram [n]" reads as
+/// a caption.
+fn is_caption(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.split_whitespace().count() > 15 {
+        return false;
+    }
+    let mut words = trimmed.split([' ', '\t', '.', ':', '\u{00a0}']);
+    let first = words.next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        first.as_str(),
+        "figure" | "fig" | "table" | "exhibit" | "chart" | "diagram" | "image" | "plate"
+    )
 }
 
 /// Classify a non-heading block by its leading glyphs.
@@ -320,7 +367,10 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
             Some(c) => {
                 let over = c.tokens + block_tokens > opts.target_tokens;
                 let same = c.page == block.page && c.heading_path == path;
-                (c.page != block.page || c.heading_path != path || over, same, over)
+                // Only merge blocks of the same kind, so tables/captions/lists
+                // stay distinct chunks rather than dissolving into paragraphs.
+                let flush = !same || c.kind != block.kind || over;
+                (flush, same, over)
             }
             None => (false, false, false),
         };

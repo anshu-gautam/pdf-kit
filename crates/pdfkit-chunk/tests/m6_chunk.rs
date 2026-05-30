@@ -82,6 +82,24 @@ fn separate_blocks_pack_together_under_target() {
 }
 
 #[test]
+fn detects_table_and_caption() {
+    let chunks = chunks_of(pdfkit_fixtures::table_doc(), &ChunkOptions::default());
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c.kind == ElementKind::Table && c.text.contains("Engineering")),
+        "expected a Table chunk: {:?}",
+        chunks.iter().map(|c| (c.kind, &c.text)).collect::<Vec<_>>()
+    );
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c.kind == ElementKind::Caption && c.text.contains("Figure 1")),
+        "expected a Caption chunk"
+    );
+}
+
+#[test]
 fn overlap_carries_context_across_a_split() {
     // Tiny target splits Gamma and Delta (separate blocks, same chapter); with
     // overlap, the Delta chunk should begin with the tail of the Gamma chunk.

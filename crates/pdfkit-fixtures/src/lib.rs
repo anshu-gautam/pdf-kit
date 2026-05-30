@@ -166,6 +166,48 @@ pub fn forms() -> Vec<u8> {
     to_bytes(doc)
 }
 
+/// A page with a 3-column x 3-row text table (cells placed at fixed column x
+/// positions) followed by a "Figure 1: ..." caption line. For chunk
+/// table/caption detection.
+pub fn table_doc() -> Vec<u8> {
+    // (text, x, y): three columns at x = 72 / 250 / 430, three rows.
+    let cells: &[(&str, i64, i64)] = &[
+        ("Name", 72, 700),
+        ("Role", 250, 700),
+        ("Level", 430, 700),
+        ("Ada", 72, 680),
+        ("Engineering", 250, 680),
+        ("Senior", 430, 680),
+        ("Linus", 72, 660),
+        ("Systems", 250, 660),
+        ("Staff", 430, 660),
+    ];
+    let mut ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 11_i64.into()]),
+    ];
+    let place = |ops: &mut Vec<Operation>, text: &str, x: i64, y: i64| {
+        ops.push(Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                (x as f32).into(),
+                (y as f32).into(),
+            ],
+        ));
+        ops.push(Operation::new("Tj", vec![Object::string_literal(text)]));
+    };
+    for (text, x, y) in cells {
+        place(&mut ops, text, *x, *y);
+    }
+    place(&mut ops, "Figure 1: Team roster table.", 72, 630);
+    ops.push(Operation::new("ET", vec![]));
+    to_bytes(assemble("Table Fixture", "pdfkit", ops, vec![]))
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {
