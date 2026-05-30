@@ -131,7 +131,16 @@ fn group_lines(mut runs: Vec<TextRun>) -> Vec<Line> {
         let size = r.font_size;
         if let Some(line) = lines.last_mut() {
             if (line.y - y).abs() <= line.size.max(size) * 0.5 {
-                if !line.text.is_empty() {
+                // Only insert a space at a real word gap. Many PDFs emit text as
+                // per-glyph runs (kerning via TJ); joining those with a space
+                // mangles words ("Pr i v i l eg ed"). Use the horizontal gap
+                // between the previous run's right edge and this run's left edge.
+                let gap = r.bbox[0] - line.x1;
+                let needs_space = !line.text.is_empty()
+                    && !line.text.ends_with(' ')
+                    && !r.text.starts_with(' ')
+                    && gap > line.size.max(size) * 0.25;
+                if needs_space {
                     line.text.push(' ');
                 }
                 line.text.push_str(&r.text);
