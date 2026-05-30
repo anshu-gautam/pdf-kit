@@ -7,6 +7,7 @@ use lopdf::{Dictionary, Document as LoDoc, Object, ObjectId};
 
 use crate::classify::{self, PageKind, PageSignals};
 use crate::error::PdfError;
+use crate::textrun::{self, TextRun};
 use crate::types::{OpenOptions, PdfInput, TextOptions};
 
 /// Reusable entry point for opening documents.
@@ -250,6 +251,13 @@ impl Page<'_> {
     /// Classify this page (text-based / scanned / image-only / mixed).
     pub fn classify(&self) -> PageKind {
         classify::classify(&self.signals())
+    }
+
+    /// Positioned text runs on this page (text, bounding box, effective font
+    /// size), in content-stream order. Used by chunking to detect headings and
+    /// group blocks.
+    pub fn text_runs(&self) -> Vec<TextRun> {
+        textrun::page_text_runs(&self.doc.inner, self.id)
     }
 }
 

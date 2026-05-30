@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use lopdf::content::Content;
 use lopdf::{Document as LoDoc, Object, ObjectId};
 
+use crate::geometry::Matrix;
+
 /// The coarse kind of a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageKind {
@@ -187,60 +189,5 @@ fn deref_dict<'a>(doc: &'a LoDoc, obj: &'a Object) -> Option<&'a lopdf::Dictiona
     match obj.as_reference() {
         Ok(id) => doc.get_dictionary(id).ok(),
         Err(_) => obj.as_dict().ok(),
-    }
-}
-
-/// A 2-D affine transform stored as the six PDF matrix components
-/// `[a b c d e f]` (row-vector convention: `[x y 1] * M`).
-#[derive(Debug, Clone, Copy)]
-struct Matrix {
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
-    e: f32,
-    f: f32,
-}
-
-impl Matrix {
-    const IDENTITY: Matrix = Matrix {
-        a: 1.0,
-        b: 0.0,
-        c: 0.0,
-        d: 1.0,
-        e: 0.0,
-        f: 0.0,
-    };
-
-    fn from_operands(ops: &[Object]) -> Option<Matrix> {
-        if ops.len() != 6 {
-            return None;
-        }
-        let n = |i: usize| ops[i].as_float().ok();
-        Some(Matrix {
-            a: n(0)?,
-            b: n(1)?,
-            c: n(2)?,
-            d: n(3)?,
-            e: n(4)?,
-            f: n(5)?,
-        })
-    }
-
-    /// `self * other` (apply `self` first, then `other`).
-    fn multiply(&self, other: &Matrix) -> Matrix {
-        Matrix {
-            a: self.a * other.a + self.b * other.c,
-            b: self.a * other.b + self.b * other.d,
-            c: self.c * other.a + self.d * other.c,
-            d: self.c * other.b + self.d * other.d,
-            e: self.e * other.a + self.f * other.c + other.e,
-            f: self.e * other.b + self.f * other.d + other.f,
-        }
-    }
-
-    /// The six PDF matrix components `[a b c d e f]`.
-    fn components(&self) -> [f32; 6] {
-        [self.a, self.b, self.c, self.d, self.e, self.f]
     }
 }

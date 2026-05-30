@@ -61,6 +61,44 @@ pub fn mixed() -> Vec<u8> {
     to_bytes(assemble("Mixed Fixture", "pdfkit", ops, images))
 }
 
+/// Lines of the multi-heading fixture as `(text, font_size_points)`, in order.
+/// Two heading levels (22 and 16 pt) over 11 pt body text.
+pub const MULTI_HEADING_LINES: &[(&str, i64)] = &[
+    ("Chapter One", 22),
+    ("Section A", 16),
+    (
+        "Alpha body paragraph with some descriptive sentence text here.",
+        11,
+    ),
+    (
+        "More alpha body text to give the section a little extra volume.",
+        11,
+    ),
+    ("Section B", 16),
+    (
+        "Beta body paragraph describing the second section in brief here.",
+        11,
+    ),
+    ("Chapter Two", 22),
+    (
+        "Gamma body paragraph sitting under the second chapter heading now.",
+        11,
+    ),
+    // An empty line is a paragraph spacer: it forces a block break so Gamma and
+    // Delta are separate blocks that the packer then recombines under target.
+    ("", 11),
+    (
+        "Delta paragraph is a separate block under the same chapter heading.",
+        11,
+    ),
+];
+
+/// A document with two heading levels and body paragraphs, for chunk tests.
+pub fn multi_heading() -> Vec<u8> {
+    let ops = sized_text_ops(MULTI_HEADING_LINES);
+    to_bytes(assemble("Multi Heading Fixture", "pdfkit", ops, vec![]))
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {
@@ -98,6 +136,37 @@ fn text_ops(lines: &[&str]) -> Vec<Operation> {
             ops.push(Operation::new("Td", vec![0_i64.into(), (-18_i64).into()]));
         }
         ops.push(Operation::new("Tj", vec![Object::string_literal(*line)]));
+    }
+    ops.push(Operation::new("ET", vec![]));
+    ops
+}
+
+/// Text operations drawing each `(line, size)` at an absolute position, one per
+/// line, top to bottom, with per-line font size.
+fn sized_text_ops(lines: &[(&str, i64)]) -> Vec<Operation> {
+    let mut ops = vec![Operation::new("BT", vec![])];
+    let mut y = 740.0f32;
+    for (text, size) in lines {
+        let s = *size as f32;
+        if text.is_empty() {
+            // Paragraph spacer: advance the cursor without drawing.
+            y -= s * 1.6 + 6.0;
+            continue;
+        }
+        ops.push(Operation::new("Tf", vec!["F1".into(), (*size).into()]));
+        ops.push(Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                72.0f32.into(),
+                y.into(),
+            ],
+        ));
+        ops.push(Operation::new("Tj", vec![Object::string_literal(*text)]));
+        y -= s * 1.6 + 6.0;
     }
     ops.push(Operation::new("ET", vec![]));
     ops

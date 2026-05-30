@@ -417,6 +417,10 @@ version = "0.1.0"
 [[package]]
 name = "pdfkit-chunk"
 version = "0.1.0"
+dependencies = [
+ "pdfkit-core",
+ "pdfkit-fixtures",
+]
 
 [[package]]
 name = "pdfkit-cli"

@@ -17,6 +17,7 @@ fn main() -> std::io::Result<()> {
         ("born-digital.pdf", pdfkit_fixtures::born_digital()),
         ("scanned.pdf", pdfkit_fixtures::scanned()),
         ("mixed.pdf", pdfkit_fixtures::mixed()),
+        ("multi-heading.pdf", pdfkit_fixtures::multi_heading()),
         ("encrypted.pdf", pdfkit_fixtures::encrypted_default()),
     ];
 

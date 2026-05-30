@@ -8,5 +8,7 @@ repository.workspace = true
 description = "pdfkit chunking: structured/RAG chunks with page, bbox, kind, and heading path."
 
 [dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false }
 
 [dev-dependencies]
+pdfkit-fixtures = { path = "../pdfkit-fixtures" }
