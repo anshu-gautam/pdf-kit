@@ -134,14 +134,30 @@ editor.merge(&PdfEditor::open("b.pdf")?)?;
 The default build (`render-native`) compiles and passes tests with **no** native
 dependencies and **no** network.
 
-## OCR models
+## OCR (scanned pages)
 
-`ocr-ocrs` loads local `.rten` models that are not vendored in git. Fetch them
-once into a cache directory:
+`ocr-ocrs` performs **local, offline** OCR via `ocrs` + `rten` (pure Rust, no
+native deps). It loads `.rten` models that are not vendored in git — fetch them
+once:
 
 ```bash
 scripts/fetch-ocr-models.sh   # downloads into $PDFKIT_OCR_MODELS or ~/.cache/pdfkit/models
 ```
+
+Then recover text from scanned/image-only pages:
+
+```rust
+use pdfkit_core::{extract_with_ocr, ExtractOptions};
+use pdfkit_ocr::OcrsProvider;
+
+let provider = OcrsProvider::new()?;                 // loads the cached models
+let opts = ExtractOptions { ocr: true, ..Default::default() };
+let result = extract_with_ocr("scan.pdf", opts, &provider)?;
+# Ok::<(), pdfkit_core::PdfError>(())
+```
+
+`ocrs` is an early-stage engine (Latin script, preview-grade accuracy); for the
+highest accuracy, plug in `ocr-tesseract` or your own [`OcrProvider`].
 
 ## Performance
 
@@ -178,8 +194,9 @@ cargo run -p pdfkit-fixtures --bin write-fixtures                       # regene
   library is **not** vendored. `scripts/fetch-pdfium.sh` downloads it from
   [`bblanchon/pdfium-binaries`](https://github.com/bblanchon/pdfium-binaries)
   (verified against tag `chromium/7857`, mac-arm64) into `~/.cache/pdfkit`.
-- `ocr-ocrs` downloads ONNX `.rten` models via the setup script; they are not
-  vendored.
+- `ocr-ocrs` runs local OCR via `ocrs` + `rten` and downloads ONNX `.rten`
+  models via `scripts/fetch-ocr-models.sh` (from the ocrs model bucket); the
+  models are not vendored.
 
 ## License
 

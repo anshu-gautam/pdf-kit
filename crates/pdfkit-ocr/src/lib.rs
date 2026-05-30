@@ -42,19 +42,23 @@ fn models_dir() -> std::path::PathBuf {
 #[cfg(feature = "ocr-ocrs")]
 mod ocrs_backend {
     use super::models_dir;
+    use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
     use pdfkit_core::{Bitmap, OcrProvider, OcrResult, PdfError};
-    use std::path::PathBuf;
 
-    /// Local ONNX OCR via `ocrs` + `rten`, loading `.rten` detection and
-    /// recognition models from the cache directory.
-    #[derive(Debug, Clone)]
+    /// Local ONNX OCR via `ocrs` + `rten`, with the `.rten` detection and
+    /// recognition models loaded from the cache directory.
     pub struct OcrsProvider {
-        models: PathBuf,
+        engine: OcrEngine,
+    }
+
+    impl std::fmt::Debug for OcrsProvider {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("OcrsProvider").finish_non_exhaustive()
+        }
     }
 
     impl OcrsProvider {
-        /// Construct a provider, verifying the detection and recognition models
-        /// are present in the cache directory.
+        /// Load the detection and recognition models and build the engine.
         pub fn new() -> Result<Self, PdfError> {
             let models = models_dir();
             let detection = models.join("text-detection.rten");
@@ -65,22 +69,41 @@ mod ocrs_backend {
                     models.display()
                 )));
             }
-            Ok(OcrsProvider { models })
+            let detection_model = rten::Model::load_file(&detection)
+                .map_err(|e| PdfError::Backend(format!("ocrs detection model: {e}")))?;
+            let recognition_model = rten::Model::load_file(&recognition)
+                .map_err(|e| PdfError::Backend(format!("ocrs recognition model: {e}")))?;
+            let engine = OcrEngine::new(OcrEngineParams {
+                detection_model: Some(detection_model),
+                recognition_model: Some(recognition_model),
+                ..Default::default()
+            })
+            .map_err(|e| PdfError::Backend(format!("ocrs engine: {e}")))?;
+            Ok(OcrsProvider { engine })
         }
     }
 
     impl OcrProvider for OcrsProvider {
-        fn recognize(&self, _bmp: &Bitmap) -> Result<OcrResult, PdfError> {
-            // TODO(design): run ocrs (rten) inference with the loaded `.rten`
-            // models (load OcrEngine, detect words, recognize text, fill
-            // OcrResult/OcrWord with bboxes and confidences). The native lib and
-            // models are not available in this build environment, so recognition
-            // is not yet wired; the abstraction and pipeline are exercised via a
-            // mock provider in pdfkit-core's M5 tests.
-            Err(PdfError::Backend(format!(
-                "ocrs inference not yet wired (models at {})",
-                self.models.display()
-            )))
+        fn recognize(&self, bmp: &Bitmap) -> Result<OcrResult, PdfError> {
+            // The RGBA bitmap is HWC with 4 channels, which ImageSource accepts.
+            let source = ImageSource::from_bytes(&bmp.rgba, (bmp.width, bmp.height))
+                .map_err(|e| PdfError::Backend(format!("ocrs image: {e}")))?;
+            let input = self
+                .engine
+                .prepare_input(source)
+                .map_err(|e| PdfError::Backend(format!("ocrs prepare: {e}")))?;
+            let text = self
+                .engine
+                .get_text(&input)
+                .map_err(|e| PdfError::Backend(format!("ocrs recognize: {e}")))?;
+            // ocrs's high-level `get_text` doesn't surface a confidence score, so
+            // we report 1.0 when text is produced and omit per-word boxes.
+            // TODO(design): use detect_words + recognize_text for word bboxes.
+            Ok(OcrResult {
+                text,
+                confidence: 1.0,
+                words: Vec::new(),
+            })
         }
     }
 }

@@ -11,12 +11,15 @@ description = "pdfkit OCR: rasterize + recognize scanned pages. Local ONNX (ocrs
 default = []
 # Local, pure-Rust ONNX OCR via ocrs + rten. Models are fetched into a cache dir
 # by scripts/fetch-ocr-models.sh (never vendored in git).
-ocr-ocrs = []
+ocr-ocrs = ["dep:ocrs", "dep:rten", "dep:image"]
 # Tesseract OCR. Requires a system Tesseract library; never in the default build.
 ocr-tesseract = []
 
 [dependencies]
 pdfkit-core = { path = "../pdfkit-core" }
+ocrs = { version = "0.12", optional = true }
+rten = { version = "0.24", optional = true }
+image = { workspace = true, optional = true }
 
 [dev-dependencies]
 pdfkit-fixtures = { path = "../pdfkit-fixtures" }
