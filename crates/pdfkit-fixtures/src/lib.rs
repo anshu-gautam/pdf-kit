@@ -22,11 +22,18 @@ pub const ENCRYPTED_OWNER_PASSWORD: &str = "owner-secret";
 /// The correct user password for the encrypted fixture.
 pub const ENCRYPTED_USER_PASSWORD: &str = "open-sesame";
 
-/// The exact text lines drawn into [`born_digital`], in order.
+/// The exact text lines drawn into [`born_digital`], in order. There are enough
+/// of them to clear the default `min_text_chars` (200) so the document reads as
+/// genuinely text-based.
 pub const BORN_DIGITAL_LINES: &[&str] = &[
     "Hello, pdfkit!",
     "This is a born-digital fixture.",
     "It carries a real text layer.",
+    "The quick brown fox jumps over the lazy dog.",
+    "Pack my box with five dozen liquor jugs.",
+    "Sphinx of black quartz, judge my vow.",
+    "How vexingly quick daft zebras jump!",
+    "The five boxing wizards jump quickly.",
 ];
 
 /// A single-page, born-digital PDF with a real text layer plus Title/Author.

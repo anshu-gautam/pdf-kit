@@ -11,12 +11,14 @@
 mod classify;
 mod document;
 mod error;
+mod extract;
 mod render;
 mod types;
 
 pub use classify::{PageKind, PageSignals};
 pub use document::{Document, Engine, Metadata, Page};
 pub use error::PdfError;
+pub use extract::{extract, ExtractOptions, ExtractResult, Mode, PdfImage, Truncated};
 pub use render::{Background, Bitmap, RenderOptions, Renderer};
 pub use types::{OpenOptions, PdfInput, TextOptions};
 
