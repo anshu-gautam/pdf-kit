@@ -8,5 +8,11 @@ repository.workspace = true
 description = "pdfkit edit: create, merge, split, rotate, watermark, and fill forms. The write path."
 
 [dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false }
+lopdf = { workspace = true }
+image = { workspace = true, features = ["png"] }
 
 [dev-dependencies]
+pdfkit-fixtures = { path = "../pdfkit-fixtures" }
+pdfkit-core = { path = "../pdfkit-core" }
+image = { workspace = true, features = ["png"] }

@@ -57,6 +57,13 @@ impl PdfError {
     }
 }
 
+/// I/O failures (e.g. while serializing a document) surface as backend errors.
+impl From<std::io::Error> for PdfError {
+    fn from(e: std::io::Error) -> Self {
+        PdfError::Backend(format!("i/o error: {e}"))
+    }
+}
+
 /// Collapse a backend `lopdf::Error` into the public error model at the crate
 /// boundary, so callers never see (or depend on) the lopdf error type.
 impl From<lopdf::Error> for PdfError {

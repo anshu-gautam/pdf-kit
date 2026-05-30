@@ -99,6 +99,73 @@ pub fn multi_heading() -> Vec<u8> {
     to_bytes(assemble("Multi Heading Fixture", "pdfkit", ops, vec![]))
 }
 
+/// The text field name in the [`forms`] fixture.
+pub const FORM_FIELD_NAME: &str = "name";
+
+/// A single-page PDF with an AcroForm containing one text field named
+/// [`FORM_FIELD_NAME`].
+pub fn forms() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "Helv" => font_id },
+    });
+
+    let field_id = doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Tx",
+        "T" => Object::string_literal(FORM_FIELD_NAME),
+        "V" => Object::string_literal(""),
+        "Rect" => vec![100_i64.into(), 700_i64.into(), 300_i64.into(), 720_i64.into()],
+        "P" => page_id,
+        "DA" => Object::string_literal("/Helv 12 Tf 0 g"),
+    });
+
+    doc.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()],
+            "Resources" => resources_id,
+            "Annots" => vec![field_id.into()],
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1_i64,
+        }),
+    );
+
+    let acroform_id = doc.add_object(dictionary! {
+        "Fields" => vec![field_id.into()],
+        "NeedAppearances" => true,
+    });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "AcroForm" => acroform_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+
+    let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
+    doc.trailer
+        .set("ID", Object::Array(vec![file_id.clone(), file_id]));
+
+    to_bytes(doc)
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {

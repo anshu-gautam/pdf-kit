@@ -439,6 +439,12 @@ dependencies = [
 [[package]]
 name = "pdfkit-edit"
 version = "0.1.0"
+dependencies = [
+ "image",
+ "lopdf",
+ "pdfkit-core",
+ "pdfkit-fixtures",
+]
 
 [[package]]
 name = "pdfkit-fixtures"
