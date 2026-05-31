@@ -533,18 +533,39 @@ fn show_run(
     let width_text = advance_units / 1000.0 * font_size;
 
     let combined = tm.multiply(ctm);
-    let x0 = combined.e;
-    let y0 = combined.f;
     let effective_size = if font_size > 0.0 {
         font_size * combined.vertical_scale()
     } else {
         combined.vertical_scale()
     };
-    let width_user = width_text * combined.horizontal_scale();
+    // Bounding box from the run's four transformed corners (origin, +advance,
+    // +ascent), so a rotated/skewed run gets its true axis-aligned extent rather
+    // than a horizontal one. For ordinary un-rotated text (b == c == 0 and
+    // positive scales) this matches the previous [e, f, e + width*hscale,
+    // f + size*vscale] formula exactly; for rotated or flipped (negative-scale)
+    // text it correctly bounds the glyphs instead of assuming rightward advance.
+    let height = if font_size > 0.0 { font_size } else { 1.0 };
+    let corners = [
+        (0.0, 0.0),
+        (width_text, 0.0),
+        (0.0, height),
+        (width_text, height),
+    ];
+    let mut x0 = f32::INFINITY;
+    let mut y0 = f32::INFINITY;
+    let mut x1 = f32::NEG_INFINITY;
+    let mut y1 = f32::NEG_INFINITY;
+    for (dx, dy) in corners {
+        let (px, py) = combined.apply(dx, dy);
+        x0 = x0.min(px);
+        y0 = y0.min(py);
+        x1 = x1.max(px);
+        y1 = y1.max(py);
+    }
 
     runs.push(TextRun {
         text,
-        bbox: [x0, y0, x0 + width_user, y0 + effective_size],
+        bbox: [x0, y0, x1, y1],
         font_size: effective_size,
         mcid,
     });

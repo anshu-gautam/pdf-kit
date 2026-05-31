@@ -910,6 +910,31 @@ pub fn ruled_table_spanning_cell() -> Vec<u8> {
     to_bytes(assemble("Ruled Table Fixture", "pdfkit", ops, vec![]))
 }
 
+/// A single-page PDF with one 90°-rotated text run ("Rotated") drawn via a
+/// rotation text matrix. Its visual extent is tall and narrow; used to check
+/// that run bounding boxes follow the rotation rather than assuming horizontal.
+pub fn rotated_text() -> Vec<u8> {
+    // Tm = [0 1 -1 0 200 400]: rotate +90° about the origin, place at (200,400).
+    let ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 12_i64.into()]),
+        Operation::new(
+            "Tm",
+            vec![
+                0.0f32.into(),
+                1.0f32.into(),
+                (-1.0f32).into(),
+                0.0f32.into(),
+                200.0f32.into(),
+                400.0f32.into(),
+            ],
+        ),
+        Operation::new("Tj", vec![Object::string_literal("Rotated")]),
+        Operation::new("ET", vec![]),
+    ];
+    to_bytes(assemble("Rotated Text Fixture", "pdfkit", ops, vec![]))
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {

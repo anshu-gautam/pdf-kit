@@ -72,11 +72,6 @@ impl Matrix {
         (self.c * self.c + self.d * self.d).sqrt()
     }
 
-    /// Approximate horizontal scale factor of the linear part.
-    pub(crate) fn horizontal_scale(&self) -> f32 {
-        (self.a * self.a + self.b * self.b).sqrt()
-    }
-
     /// Map a point `(x, y)` through the transform (row-vector convention).
     pub(crate) fn apply(&self, x: f32, y: f32) -> (f32, f32) {
         (

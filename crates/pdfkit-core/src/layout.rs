@@ -103,11 +103,12 @@ const WORD_GAP: f32 = 0.25;
 // split *less* likely, so the worst case is "treated as one column" (today's
 // behavior), never a scrambled split. All empirical; validated on the fixtures.
 //
-// TODO(design): known limitations of this conservative detector, acceptable for
-// now (PRD §12): rotated/CTM-scaled text uses unscaled-point thresholds; a tall
-// multi-column *table* (>= MIN_LINES_PER_COLUMN rows per cell column) could be
-// read column-major; thresholds are validated on synthetic fixtures, not a real
-// corpus. Relaxing any of these wants corpus validation first.
+// Run bounding boxes now follow the text's rotation (see textrun::show_run), so
+// a rotated run reports its true axis-aligned extent rather than a horizontal
+// one. TODO(design): the gutter thresholds below are still in unscaled points
+// and validated only on synthetic fixtures; a tall multi-column *table* (>=
+// MIN_LINES_PER_COLUMN rows per cell column) could be read column-major. Tuning
+// these wants a real corpus (PRD §12).
 
 /// Max fractional vertical coverage for an x-bin to count as empty (gutter).
 /// Lower values risk false gutters in ragged-right single-column text.

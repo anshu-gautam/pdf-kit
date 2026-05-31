@@ -153,3 +153,19 @@ fn type0_identity_font_uses_cid_widths_for_advance() {
         pdfkit_fixtures::TYPE0_ADVANCE_PTS
     );
 }
+
+#[test]
+fn rotated_run_bbox_is_tall_not_wide() {
+    let doc = Engine::new()
+        .unwrap()
+        .open(pdfkit_fixtures::rotated_text(), OpenOptions::default())
+        .expect("open rotated fixture");
+    let runs = doc.page(1).expect("page 1").text_runs();
+    assert_eq!(runs.len(), 1);
+    let b = runs[0].bbox;
+    let (w, h) = (b[2] - b[0], b[3] - b[1]);
+    // 90°-rotated text advances upward, so its box is taller than it is wide
+    // (the old horizontal-only formula would have made it wide and ~12pt tall).
+    assert!(h > w, "rotated run should be tall, got w={w} h={h}");
+    assert!(w > 0.0 && h > 0.0);
+}
