@@ -40,15 +40,23 @@ fn ocrs_provider_reports_missing_models() {
 
 #[cfg(feature = "ocr-tesseract")]
 #[test]
-fn tesseract_provider_reports_unavailable() {
+fn tesseract_provider_recognizes_or_errors_cleanly() {
+    // With the system Tesseract + `eng` data present (CI installs them), this
+    // runs real OCR on a blank tile and returns Ok with a 0..=1 confidence and
+    // no per-word boxes; without them it returns a clean Backend error. Either
+    // way it must not panic, and the OcrResult shape must be valid.
     let provider = pdfkit_ocr::TesseractProvider::default();
     let bmp = Bitmap {
-        width: 1,
-        height: 1,
-        rgba: vec![0, 0, 0, 255],
+        width: 4,
+        height: 4,
+        rgba: vec![255; 4 * 4 * 4], // white tile
     };
-    assert!(matches!(
-        provider.recognize(&bmp),
-        Err(PdfError::Backend(_))
-    ));
+    match provider.recognize(&bmp) {
+        Ok(r) => {
+            assert!((0.0..=1.0).contains(&r.confidence), "conf {}", r.confidence);
+            assert!(r.words.is_empty());
+        }
+        Err(PdfError::Backend(_)) => {} // libs/data absent: acceptable
+        Err(e) => panic!("unexpected error kind: {e:?}"),
+    }
 }

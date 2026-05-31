@@ -25,8 +25,10 @@ pub use ocrs_backend::OcrsProvider;
 pub use tesseract_backend::TesseractProvider;
 
 /// Locate the OCR model cache directory: `$PDFKIT_OCR_MODELS` if set, else
-/// `$XDG_CACHE_HOME/pdfkit/models`, else `~/.cache/pdfkit/models`.
-#[cfg(any(feature = "ocr-ocrs", feature = "ocr-tesseract"))]
+/// `$XDG_CACHE_HOME/pdfkit/models`, else `~/.cache/pdfkit/models`. Only the
+/// ocrs backend loads cached models; Tesseract finds its data via
+/// `TESSDATA_PREFIX`.
+#[cfg(feature = "ocr-ocrs")]
 fn models_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Ok(dir) = std::env::var("PDFKIT_OCR_MODELS") {
@@ -42,8 +44,8 @@ fn models_dir() -> std::path::PathBuf {
 #[cfg(feature = "ocr-ocrs")]
 mod ocrs_backend {
     use super::models_dir;
-    use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
-    use pdfkit_core::{Bitmap, OcrProvider, OcrResult, PdfError};
+    use ocrs::{ImageSource, OcrEngine, OcrEngineParams, TextItem};
+    use pdfkit_core::{Bitmap, OcrProvider, OcrResult, OcrWord, PdfError};
 
     /// Local ONNX OCR via `ocrs` + `rten`, with the `.rten` detection and
     /// recognition models loaded from the cache directory.
@@ -92,17 +94,46 @@ mod ocrs_backend {
                 .engine
                 .prepare_input(source)
                 .map_err(|e| PdfError::Backend(format!("ocrs prepare: {e}")))?;
-            let text = self
+            // Full pipeline (detect words -> group into reading-order lines ->
+            // recognize) so we can surface per-word bounding boxes, not just the
+            // flat text from `get_text`.
+            let words = self
                 .engine
-                .get_text(&input)
+                .detect_words(&input)
+                .map_err(|e| PdfError::Backend(format!("ocrs detect: {e}")))?;
+            let line_rects = self.engine.find_text_lines(&input, &words);
+            let lines = self
+                .engine
+                .recognize_text(&input, &line_rects)
                 .map_err(|e| PdfError::Backend(format!("ocrs recognize: {e}")))?;
-            // ocrs's high-level `get_text` doesn't surface a confidence score, so
-            // we report 1.0 when text is produced and omit per-word boxes.
-            // TODO(design): use detect_words + recognize_text for word bboxes.
+
+            let mut text = String::new();
+            let mut out_words: Vec<OcrWord> = Vec::new();
+            for line in lines.into_iter().flatten() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&line.to_string());
+                for word in line.words() {
+                    let r = word.bounding_rect();
+                    out_words.push(OcrWord {
+                        text: word.to_string(),
+                        bbox: [
+                            r.left() as f32,
+                            r.top() as f32,
+                            r.right() as f32,
+                            r.bottom() as f32,
+                        ],
+                        // ocrs does not expose a per-word confidence; report 1.0
+                        // for any recognized word rather than a fabricated score.
+                        confidence: 1.0,
+                    });
+                }
+            }
             Ok(OcrResult {
                 text,
                 confidence: 1.0,
-                words: Vec::new(),
+                words: out_words,
             })
         }
     }
@@ -110,9 +141,12 @@ mod ocrs_backend {
 
 #[cfg(feature = "ocr-tesseract")]
 mod tesseract_backend {
-    use pdfkit_core::{Bitmap, OcrProvider, OcrResult, PdfError};
+    use leptess::LepTess;
+    use pdfkit_core::{encode_png, Bitmap, OcrProvider, OcrResult, PdfError};
 
-    /// OCR via the system Tesseract library.
+    /// OCR via the system Tesseract library (the `leptess` binding). The
+    /// language's trained data (e.g. `eng.traineddata`) must be on Tesseract's
+    /// `TESSDATA_PREFIX` path.
     #[derive(Debug, Clone)]
     pub struct TesseractProvider {
         language: String,
@@ -136,13 +170,26 @@ mod tesseract_backend {
     }
 
     impl OcrProvider for TesseractProvider {
-        fn recognize(&self, _bmp: &Bitmap) -> Result<OcrResult, PdfError> {
-            // TODO(design): bind the system Tesseract library and recognize.
-            // The library is not available in this build environment.
-            Err(PdfError::Backend(format!(
-                "tesseract backend ({}) requires the system Tesseract library; not wired",
-                self.language
-            )))
+        fn recognize(&self, bmp: &Bitmap) -> Result<OcrResult, PdfError> {
+            // Tesseract reads an encoded image; hand it a PNG of the bitmap.
+            let png = encode_png(bmp, true)?;
+            let mut lep = LepTess::new(None, &self.language).map_err(|e| {
+                PdfError::Backend(format!("tesseract init ({}): {e}", self.language))
+            })?;
+            lep.set_image_from_mem(&png)
+                .map_err(|e| PdfError::Backend(format!("tesseract image: {e}")))?;
+            let text = lep
+                .get_utf8_text()
+                .map_err(|e| PdfError::Backend(format!("tesseract recognize: {e}")))?;
+            // Tesseract reports a 0..=100 mean word confidence; map to 0.0..=1.0.
+            // Per-word boxes aren't surfaced here (a future refinement could use
+            // the TSV/hOCR iterator); `words` stays empty.
+            let confidence = (lep.mean_text_conf() as f32 / 100.0).clamp(0.0, 1.0);
+            Ok(OcrResult {
+                text,
+                confidence,
+                words: Vec::new(),
+            })
         }
     }
 }

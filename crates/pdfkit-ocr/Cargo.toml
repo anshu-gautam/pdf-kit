@@ -12,14 +12,18 @@ default = []
 # Local, pure-Rust ONNX OCR via ocrs + rten. Models are fetched into a cache dir
 # by scripts/fetch-ocr-models.sh (never vendored in git).
 ocr-ocrs = ["dep:ocrs", "dep:rten", "dep:image"]
-# Tesseract OCR. Requires a system Tesseract library; never in the default build.
-ocr-tesseract = []
+# Tesseract OCR via the `leptess` binding. Requires the system Tesseract and
+# Leptonica libraries (+ headers) at build time; never in the default build.
+# Pulls in pdfkit-core/render-native for encode_png (Tesseract wants an encoded
+# image, not raw RGBA).
+ocr-tesseract = ["dep:leptess", "pdfkit-core/render-native"]
 
 [dependencies]
 pdfkit-core = { path = "../pdfkit-core" }
 ocrs = { version = "0.12", optional = true }
 rten = { version = "0.24", optional = true }
 image = { workspace = true, optional = true }
+leptess = { version = "0.14", optional = true }
 
 [dev-dependencies]
 pdfkit-fixtures = { path = "../pdfkit-fixtures" }
