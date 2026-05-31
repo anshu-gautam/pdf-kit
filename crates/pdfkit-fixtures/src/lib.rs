@@ -10,7 +10,7 @@
 use lopdf::content::{Content, Operation};
 use lopdf::{
     dictionary, Dictionary, Document, EncryptionState, EncryptionVersion, Object, Permissions,
-    Stream,
+    Stream, StringFormat,
 };
 
 /// US Letter page size in points.
@@ -206,6 +206,113 @@ pub fn table_doc() -> Vec<u8> {
     place(&mut ops, "Figure 1: Team roster table.", 72, 630);
     ops.push(Operation::new("ET", vec![]));
     to_bytes(assemble("Table Fixture", "pdfkit", ops, vec![]))
+}
+
+/// Expected total advance width, in points, of the single show-text run in
+/// [`type0_identity`]: CID 0 (2000) + CID 1 (1000) = 3000/1000 em at 10pt = 30pt.
+pub const TYPE0_ADVANCE_PTS: f32 = 30.0;
+
+/// A single-page PDF whose only font is a composite Type0 font with an
+/// `Identity-H` encoding and a descendant CIDFont carrying explicit `/W`
+/// per-CID widths (CID 0 = 2000, CID 1 = 1000) plus `/DW` 1000. The content
+/// shows the two-byte codes `0x0000 0x0001`, so a correct CID-aware advance is
+/// [`TYPE0_ADVANCE_PTS`] — unlike the old char-count×0.5em estimate.
+pub fn type0_identity() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+
+    let descriptor_id = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "PKID+Test",
+        "Flags" => 4_i64,
+        "ItalicAngle" => 0_i64,
+        "Ascent" => 800_i64,
+        "Descent" => -200_i64,
+        "CapHeight" => 700_i64,
+        "StemV" => 80_i64,
+        "FontBBox" => vec![0_i64.into(), (-200_i64).into(), 1000_i64.into(), 800_i64.into()],
+    });
+    let cidfont_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => "PKID+Test",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0_i64,
+        },
+        "FontDescriptor" => descriptor_id,
+        "DW" => 1000_i64,
+        // /W form `c [w0 w1]`: CID 0 -> 2000, CID 1 -> 1000.
+        "W" => vec![0_i64.into(), vec![2000_i64.into(), 1000_i64.into()].into()],
+        "CIDToGIDMap" => "Identity",
+    });
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => "PKID+Test",
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![cidfont_id.into()],
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F0" => font_id },
+    });
+
+    let ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F0".into(), 10_i64.into()]),
+        Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                100.0f32.into(),
+                700.0f32.into(),
+            ],
+        ),
+        Operation::new(
+            "Tj",
+            vec![Object::String(
+                vec![0x00, 0x00, 0x00, 0x01],
+                StringFormat::Hexadecimal,
+            )],
+        ),
+        Operation::new("ET", vec![]),
+    ];
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        Content { operations: ops }
+            .encode()
+            .expect("encode content stream"),
+    ));
+
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "MediaBox" => vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()],
+        "Resources" => resources_id,
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+
+    let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
+    doc.trailer
+        .set("ID", Object::Array(vec![file_id.clone(), file_id]));
+    to_bytes(doc)
 }
 
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
