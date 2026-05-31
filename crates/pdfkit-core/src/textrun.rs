@@ -435,9 +435,19 @@ fn deref_dict<'a>(doc: &'a LoDoc, obj: &'a Object) -> Option<&'a Dictionary> {
 /// Decode a show-text byte string with the active font encoding, falling back to
 /// Latin-1 when no encoding is known or decoding fails.
 fn decode(encoding: Option<&Encoding>, bytes: &[u8]) -> String {
-    match encoding {
+    let raw = match encoding {
         Some(enc) => LoDoc::decode_text(enc, bytes).unwrap_or_else(|_| latin1(bytes)),
         None => latin1(bytes),
+    };
+    // A show-text string never carries real line/tab structure — any tab,
+    // newline, or carriage return in the decoded glyph text is spurious and
+    // would later be misread as a line/row/column break (the structural
+    // separators are inserted by layout grouping, not by glyphs). Fold them to
+    // a space; leave all other characters untouched.
+    if raw.contains(['\n', '\r', '\t']) {
+        raw.replace(['\n', '\r', '\t'], " ")
+    } else {
+        raw
     }
 }
 
