@@ -14,3 +14,9 @@
 
 # wasm-pack output
 /crates/pdfkit-wasm/pkg/
+
+# cargo-fuzz (see fuzz/README.md): build output, generated corpus, crash artifacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/Cargo.lock
