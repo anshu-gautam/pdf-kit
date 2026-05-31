@@ -155,6 +155,55 @@ fn chunk_text_is_reading_order_plain_text() {
 }
 
 #[test]
+fn outline_json_lists_bookmarks() {
+    let file = temp("outline.pdf", &pdfkit_fixtures::outline_and_links());
+    let out = bin().arg("outline").arg(&file).output().unwrap();
+    assert!(out.status.success(), "exit {:?}", out.status.code());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["title"], "Chapter 1");
+    assert_eq!(arr[0]["page"], 1);
+    assert_eq!(arr[0]["children"][0]["title"], "Section 1.1");
+}
+
+#[test]
+fn structure_json_for_tagged_document() {
+    let file = temp("tagged.pdf", &pdfkit_fixtures::tagged_minimal());
+    let out = bin().arg("structure").arg(&file).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    assert_eq!(v["tag"], "Root");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("\"Title\"") && text.contains("A pie chart"),
+        "{text}"
+    );
+}
+
+#[test]
+fn structure_json_untagged_is_false() {
+    let file = temp("born-struct.pdf", &pdfkit_fixtures::born_digital());
+    let out = bin().arg("structure").arg(&file).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    assert_eq!(v["tagged"], false);
+}
+
+#[test]
+fn figures_json_lists_regions_with_captions() {
+    let file = temp("figs.pdf", &pdfkit_fixtures::figure_with_caption());
+    let out = bin().arg("figures").arg(&file).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["page"], 1);
+    assert_eq!(arr[0]["caption"], "Figure 1: A sample chart.");
+    assert!(arr[0]["bbox"].is_array());
+}
+
+#[test]
 fn render_out_of_range_page_errors() {
     let file = temp("born-range.pdf", &pdfkit_fixtures::born_digital());
     let out = bin()

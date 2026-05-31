@@ -14,9 +14,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use pdfkit_chunk::{chunk_document, document_text, to_markdown, ChunkOptions};
 use pdfkit_core::{
-    encode_png, extract, Engine, ExtractOptions, Mode, NativeRenderer, OpenOptions, PdfError,
-    PdfInput, RenderOptions, Renderer,
+    encode_png, extract, Document, Engine, ExtractOptions, Mode, NativeRenderer, OpenOptions,
+    OutlineItem, PdfError, PdfInput, RenderOptions, Renderer, StructNode,
 };
+use serde_json::{json, Value};
 
 /// Which rendering backend to use for `render`.
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -62,6 +63,27 @@ enum Command {
     Render(RenderArgs),
     /// Emit structured RAG chunks as JSON, Markdown, or plain reading-order text.
     Chunk(ChunkArgs),
+    /// Print the document outline (bookmarks / table of contents) as JSON.
+    Outline(DocArgs),
+    /// Print the tagged-PDF logical structure tree as JSON (or `{"tagged":false}`).
+    Structure(DocArgs),
+    /// Print image/figure regions (bbox + caption) per page as JSON.
+    Figures(DocArgs),
+}
+
+/// Args shared by the read-only inspection subcommands.
+#[derive(Parser, Debug)]
+struct DocArgs {
+    /// PDF file to inspect (or `-` for stdin).
+    file: String,
+
+    /// Password for an encrypted document.
+    #[arg(long)]
+    password: Option<String>,
+
+    /// Read the password from a file.
+    #[arg(long, value_name = "PATH")]
+    password_file: Option<PathBuf>,
 }
 
 /// Output format for `chunk`.
@@ -193,6 +215,9 @@ fn run(mut cli: Cli) -> Result<(), CliError> {
     match cli.command.take() {
         Some(Command::Render(args)) => return run_render(args),
         Some(Command::Chunk(args)) => return run_chunk(args),
+        Some(Command::Outline(args)) => return run_outline(args),
+        Some(Command::Structure(args)) => return run_structure(args),
+        Some(Command::Figures(args)) => return run_figures(args),
         None => {}
     }
     let file = cli
@@ -296,6 +321,70 @@ fn run_chunk(args: ChunkArgs) -> Result<(), CliError> {
     let mut out = stdout.lock();
     writeln!(out, "{rendered}")?;
     Ok(())
+}
+
+/// Open a document for a read-only inspection subcommand.
+fn open_doc(args: &DocArgs) -> Result<Document, CliError> {
+    let input = read_input(&args.file)?;
+    let password = resolve_password(&args.password, &args.password_file)?;
+    Ok(Engine::new()?.open(input, OpenOptions { password })?)
+}
+
+/// Print a JSON value (pretty) to stdout.
+fn print_json(value: &Value) -> Result<(), CliError> {
+    let rendered = serde_json::to_string_pretty(value)
+        .map_err(|e| CliError::Pdf(PdfError::Backend(format!("json: {e}"))))?;
+    writeln!(io::stdout().lock(), "{rendered}")?;
+    Ok(())
+}
+
+fn outline_json(item: &OutlineItem) -> Value {
+    json!({
+        "title": item.title,
+        "page": item.page,
+        "children": item.children.iter().map(outline_json).collect::<Vec<_>>(),
+    })
+}
+
+fn run_outline(args: DocArgs) -> Result<(), CliError> {
+    let doc = open_doc(&args)?;
+    let outline: Vec<Value> = doc.outline().iter().map(outline_json).collect();
+    print_json(&Value::Array(outline))
+}
+
+fn structure_json(node: &StructNode) -> Value {
+    json!({
+        "tag": node.tag,
+        "raw_tag": node.raw_tag,
+        "text": node.text,
+        "alt": node.alt,
+        "page": node.page,
+        "children": node.children.iter().map(structure_json).collect::<Vec<_>>(),
+    })
+}
+
+fn run_structure(args: DocArgs) -> Result<(), CliError> {
+    let doc = open_doc(&args)?;
+    let value = match doc.structure_tree() {
+        Some(root) => structure_json(&root),
+        None => json!({ "tagged": false }),
+    };
+    print_json(&value)
+}
+
+fn run_figures(args: DocArgs) -> Result<(), CliError> {
+    let doc = open_doc(&args)?;
+    let mut figures = Vec::new();
+    for page in 1..=doc.page_count() {
+        for region in doc.page(page)?.image_regions() {
+            figures.push(json!({
+                "page": page,
+                "bbox": region.bbox,
+                "caption": region.caption,
+            }));
+        }
+    }
+    print_json(&Value::Array(figures))
 }
 
 fn run_render(args: RenderArgs) -> Result<(), CliError> {

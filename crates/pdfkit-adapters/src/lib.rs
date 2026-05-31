@@ -52,6 +52,21 @@ pub fn to_data_urls(result: &ExtractResult) -> Vec<String> {
         .collect()
 }
 
+/// Wrap raw PNG bytes — e.g. a figure cropped via
+/// `pdfkit_core::Bitmap::crop_region` — as an image [`ContentBlock`] for a
+/// multimodal model message.
+pub fn image_block(png: Vec<u8>) -> ContentBlock {
+    ContentBlock::Image {
+        media_type: "image/png".to_string(),
+        data: png,
+    }
+}
+
+/// A `data:` URL for raw PNG bytes (e.g. a cropped figure).
+pub fn image_data_url(png: &[u8]) -> String {
+    format!("data:image/png;base64,{}", base64_encode(png))
+}
+
 /// Standard Base64 encoding (RFC 4648, with `=` padding). Implemented locally to
 /// keep the default build dependency-free.
 fn base64_encode(data: &[u8]) -> String {
@@ -112,5 +127,25 @@ mod llm {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod image_block_tests {
+    use super::{image_block, image_data_url, ContentBlock};
+
+    #[test]
+    fn png_becomes_an_image_block_and_data_url() {
+        let png = vec![137u8, 80, 78, 71, 0, 1, 2];
+        assert_eq!(
+            image_block(png.clone()),
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: png.clone(),
+            }
+        );
+        let url = image_data_url(&png);
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(url.len() > "data:image/png;base64,".len());
     }
 }
