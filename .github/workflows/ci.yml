@@ -105,8 +105,11 @@ jobs:
           tool: cargo-fuzz
       # Compile the harness (keeps it from rotting), then a short seeded run as a
       # regression smoke test. Deep campaigns are on demand (see fuzz/README.md).
-      - run: cargo fuzz build parse
+      # `+nightly` so cargo-fuzz's `-Z sanitizer` flags are accepted; pin the host
+      # gnu target (its std is preinstalled) rather than cargo-fuzz's musl default.
+      - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu parse
       - run: |
           mkdir -p fuzz/corpus/parse
           cp fixtures/*.pdf fuzz/corpus/parse/
-          cargo fuzz run parse -- -max_total_time=60 -timeout=10 -rss_limit_mb=4096
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu parse -- \
+            -max_total_time=60 -timeout=10 -rss_limit_mb=4096
