@@ -16,6 +16,7 @@ mod geometry;
 pub mod layout;
 mod ocr;
 mod render;
+mod tagged;
 mod textrun;
 mod types;
 
@@ -26,6 +27,7 @@ pub use extract::{extract, ExtractOptions, ExtractResult, Mode, PdfImage, Trunca
 pub use layout::{group_runs_into_lines, Cell, Line, COLUMN_GAP};
 pub use ocr::{ocr_page, OcrProvider, OcrResult, OcrWord};
 pub use render::{Background, Bitmap, RenderOptions, Renderer};
+pub use tagged::StructNode;
 pub use textrun::TextRun;
 pub use types::{OpenOptions, PdfInput, TextOptions};
 

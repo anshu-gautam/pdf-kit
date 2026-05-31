@@ -9,6 +9,7 @@ use lopdf::{Dictionary, Document as LoDoc, Object, ObjectId};
 
 use crate::classify::{self, PageKind, PageSignals};
 use crate::error::PdfError;
+use crate::tagged::{self, StructNode};
 use crate::textrun::{self, TextRun};
 use crate::types::{OpenOptions, PdfInput, TextOptions};
 
@@ -237,6 +238,14 @@ impl Document {
             Ok(id) => self.inner.get_object(id).unwrap_or(obj),
             Err(_) => obj,
         }
+    }
+
+    /// The tagged-PDF logical structure tree ([`StructNode`]), or `None` when the
+    /// document is not tagged (`/MarkInfo /Marked true` + a `/StructTreeRoot`).
+    /// When present this is authoritative structure — heading levels, table
+    /// cells, list nesting, figure alt-text, and reading order.
+    pub fn structure_tree(&self) -> Option<StructNode> {
+        tagged::structure_tree(&self.inner, &self.page_ids)
     }
 
     /// The document outline (bookmarks / table of contents) as a tree, in order.
