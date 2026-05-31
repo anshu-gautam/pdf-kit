@@ -277,10 +277,17 @@ fn walk_struct(node: &StructNode, blocks: &mut Vec<Block>, last_page: &mut usize
                 ElementKind::Heading,
                 page,
                 7.0 - f32::from(level),
+                node.bbox,
             ));
         }
         TagClass::Block(kind) => {
-            blocks.push(struct_block(block_text(node, kind), kind, page, 1.0));
+            blocks.push(struct_block(
+                block_text(node, kind),
+                kind,
+                page,
+                1.0,
+                node.bbox,
+            ));
         }
         TagClass::Grouping => {
             for child in &node.children {
@@ -323,14 +330,21 @@ fn aggregate(node: &StructNode) -> String {
     parts.join("\n")
 }
 
-/// A block from the tagged path: no measured bbox (page + char offsets locate
-/// it). `size` is the heading-stack key for `pack` (ignored for non-headings).
-fn struct_block(text: String, kind: ElementKind, page: usize, size: f32) -> Block {
+/// A block from the tagged path. `bbox` is the element's measured box from its
+/// marked content (when positioned); `size` is the heading-stack key for `pack`
+/// (ignored for non-headings).
+fn struct_block(
+    text: String,
+    kind: ElementKind,
+    page: usize,
+    size: f32,
+    bbox: Option<[f32; 4]>,
+) -> Block {
     Block {
         text,
         page,
-        bbox: [0.0; 4],
-        bbox_known: false,
+        bbox: bbox.unwrap_or([0.0; 4]),
+        bbox_known: bbox.is_some(),
         size,
         kind,
         last_y: 0.0,
@@ -1286,6 +1300,7 @@ mod tests {
             text: t.into(),
             alt: None,
             page: Some(1),
+            bbox: None,
             children: Vec::new(),
         };
         let row = StructNode {
@@ -1294,6 +1309,7 @@ mod tests {
             text: String::new(),
             alt: None,
             page: Some(1),
+            bbox: None,
             children: vec![cell("A"), cell("B")],
         };
         let table = StructNode {
@@ -1302,6 +1318,7 @@ mod tests {
             text: String::new(),
             alt: None,
             page: Some(1),
+            bbox: None,
             children: vec![row],
         };
         // Container's own text is empty; descendants collected in tree order.
@@ -1313,6 +1330,7 @@ mod tests {
             text: String::new(),
             alt: None,
             page: None,
+            bbox: None,
             children: Vec::new(),
         };
         assert_eq!(aggregate(&empty), "");

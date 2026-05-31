@@ -30,6 +30,9 @@ pub struct TextRun {
     pub bbox: [f32; 4],
     /// Effective font size in points (Tf size times the text/CTM vertical scale).
     pub font_size: f32,
+    /// The marked-content id (MCID) enclosing this run, if any — maps the run
+    /// back to a tagged-PDF structure element.
+    pub mcid: Option<u32>,
 }
 
 /// Fallback advance per glyph, in 1/1000 em, when font metrics are unavailable.
@@ -142,10 +145,19 @@ pub(crate) fn text_runs_from_content(
     let mut leading = 0.0f32;
     let mut encoding: Option<&Encoding> = None;
     let mut font: Option<&FontAdvance> = None;
+    // Marked-content stack so each run can be tagged with its enclosing MCID.
+    let mut mc_stack: Vec<Option<u32>> = Vec::new();
 
     for op in &parsed.operations {
         let ops = &op.operands;
+        // Nearest enclosing MCID for any text shown in this op.
+        let mcid = mc_stack.iter().rev().copied().flatten().next();
         match op.operator.as_str() {
+            "BDC" => mc_stack.push(bdc_mcid(doc, page_id, ops)),
+            "BMC" => mc_stack.push(None),
+            "EMC" => {
+                mc_stack.pop();
+            }
             "q" => ctm_stack.push(ctm),
             "Q" => {
                 if let Some(m) = ctm_stack.pop() {
@@ -199,21 +211,27 @@ pub(crate) fn text_runs_from_content(
             }
             "Tj" => {
                 if let Some(bytes) = ops.first().and_then(|o| o.as_str().ok()) {
-                    show_run(bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs);
+                    show_run(
+                        bytes, encoding, font, font_size, &ctm, &mut tm, mcid, &mut runs,
+                    );
                 }
             }
             "'" => {
                 tlm = Matrix::translation(0.0, -leading).multiply(&tlm);
                 tm = tlm;
                 if let Some(bytes) = ops.first().and_then(|o| o.as_str().ok()) {
-                    show_run(bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs);
+                    show_run(
+                        bytes, encoding, font, font_size, &ctm, &mut tm, mcid, &mut runs,
+                    );
                 }
             }
             "\"" => {
                 tlm = Matrix::translation(0.0, -leading).multiply(&tlm);
                 tm = tlm;
                 if let Some(bytes) = ops.get(2).and_then(|o| o.as_str().ok()) {
-                    show_run(bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs);
+                    show_run(
+                        bytes, encoding, font, font_size, &ctm, &mut tm, mcid, &mut runs,
+                    );
                 }
             }
             "TJ" => {
@@ -222,7 +240,8 @@ pub(crate) fn text_runs_from_content(
                         match item {
                             Object::String(bytes, _) => {
                                 show_run(
-                                    bytes, encoding, font, font_size, &ctm, &mut tm, &mut runs,
+                                    bytes, encoding, font, font_size, &ctm, &mut tm, mcid,
+                                    &mut runs,
                                 );
                             }
                             other => {
@@ -418,6 +437,32 @@ fn deref_obj<'a>(doc: &'a LoDoc, o: &'a Object) -> Option<&'a Object> {
     }
 }
 
+/// The MCID of a `BDC` operator: from an inline `<< /MCID n >>` properties dict,
+/// or a name resolved through the page `/Resources /Properties`.
+fn bdc_mcid(doc: &LoDoc, page_id: ObjectId, operands: &[Object]) -> Option<u32> {
+    let props = operands.get(1)?;
+    let dict = match props {
+        Object::Dictionary(d) => d,
+        Object::Name(name) => {
+            let page = doc.get_dictionary(page_id).ok()?;
+            let resources = page
+                .get(b"Resources")
+                .ok()
+                .and_then(|o| deref_dict(doc, o))?;
+            let properties = resources
+                .get(b"Properties")
+                .ok()
+                .and_then(|o| deref_dict(doc, o))?;
+            properties.get(name).ok().and_then(|o| deref_dict(doc, o))?
+        }
+        _ => return None,
+    };
+    dict.get(b"MCID")
+        .ok()
+        .and_then(|o| o.as_i64().ok())
+        .and_then(|n| u32::try_from(n).ok())
+}
+
 fn deref_array<'a>(doc: &'a LoDoc, obj: Option<&'a Object>) -> Option<&'a Vec<Object>> {
     match obj? {
         Object::Reference(id) => doc.get_object(*id).ok()?.as_array().ok(),
@@ -461,6 +506,9 @@ fn num(ops: &[Object], i: usize) -> Option<f32> {
 
 /// Emit a run for a show-text byte string: decode it, advance the text matrix by
 /// the glyphs' real (or estimated) widths.
+// Each parameter is an independent piece of the text-show state; bundling them
+// into a struct would add indirection without clarifying this private helper.
+#[allow(clippy::too_many_arguments)]
 fn show_run(
     bytes: &[u8],
     encoding: Option<&Encoding>,
@@ -468,6 +516,7 @@ fn show_run(
     font_size: f32,
     ctm: &Matrix,
     tm: &mut Matrix,
+    mcid: Option<u32>,
     runs: &mut Vec<TextRun>,
 ) {
     let text = decode(encoding, bytes);
@@ -497,6 +546,7 @@ fn show_run(
         text,
         bbox: [x0, y0, x0 + width_user, y0 + effective_size],
         font_size: effective_size,
+        mcid,
     });
 
     *tm = Matrix::translation(width_text, 0.0).multiply(tm);
