@@ -25,8 +25,10 @@ pub use ocrs_backend::OcrsProvider;
 pub use tesseract_backend::TesseractProvider;
 
 /// Locate the OCR model cache directory: `$PDFKIT_OCR_MODELS` if set, else
-/// `$XDG_CACHE_HOME/pdfkit/models`, else `~/.cache/pdfkit/models`.
-#[cfg(any(feature = "ocr-ocrs", feature = "ocr-tesseract"))]
+/// `$XDG_CACHE_HOME/pdfkit/models`, else `~/.cache/pdfkit/models`. Only the
+/// ocrs backend loads cached models; Tesseract finds its data via
+/// `TESSDATA_PREFIX`.
+#[cfg(feature = "ocr-ocrs")]
 fn models_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Ok(dir) = std::env::var("PDFKIT_OCR_MODELS") {
