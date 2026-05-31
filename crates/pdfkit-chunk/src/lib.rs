@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use pdfkit_core::{
-    group_runs_into_lines, is_caption, Cell, Document, ImageRegion, Line, PdfError, StructNode,
-    TextRun, MAX_SPAN,
+    group_runs_into_lines, is_caption, lattice_from_lines, Cell, Document, ImageRegion, Line,
+    PdfError, RuledLattice, RuledLine, StructNode, TextRun, MAX_SPAN,
 };
 
 /// The kind of a structural element a chunk came from.
@@ -166,8 +166,10 @@ fn geometry_blocks(doc: &Document) -> Result<Vec<Block>, PdfError> {
     let mut blocks: Vec<Block> = Vec::new();
     for (page, runs) in pages_runs {
         let lines = group_runs_into_lines(runs);
-        let mut page_blocks = group_blocks(lines, body, page);
-        let figures = doc.page(page)?.image_regions();
+        let page_view = doc.page(page)?;
+        let ruled = page_view.ruled_lines();
+        let mut page_blocks = group_blocks(lines, body, page, &ruled);
+        let figures = page_view.image_regions();
         if !figures.is_empty() {
             // A figure adopts its caption as its own text; drop the standalone
             // Caption block for that line so the caption isn't emitted twice.
@@ -882,7 +884,7 @@ struct Block {
 const ALIGNMENT_TOL: f32 = 8.0;
 
 /// Group lines into blocks and classify each block.
-fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
+fn group_blocks(lines: Vec<Line>, body: f32, page: usize, ruled: &[RuledLine]) -> Vec<Block> {
     let heading_cutoff = body * 1.25;
     let mut blocks: Vec<Block> = Vec::new();
 
@@ -961,7 +963,13 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
             && has_aligned_column(&block.gap_rows)
         {
             block.kind = ElementKind::Table;
-            block.table = build_table(&block.rows, block.bbox);
+            // Refine an already-tabular block with ruled lines when they form a
+            // real grid over it (recovers true rowspan/colspan); otherwise fall
+            // back to the text-gap grid. Ruled lines only refine the grid of a
+            // block already promoted by the gap gate — they never create tables.
+            block.table = lattice_from_lines(ruled, block.bbox)
+                .and_then(|lattice| build_ruled_table(&block.rows, &lattice))
+                .or_else(|| build_table(&block.rows, block.bbox));
         } else if is_caption(&block.text) {
             block.kind = ElementKind::Caption;
         }
@@ -1079,6 +1087,123 @@ fn build_table(rows: &[RowCells], bbox: [f32; 4]) -> Option<Table> {
         columns,
         header_rows: 1,
         rows: grid_rows,
+    })
+}
+
+/// Build a table grid from a ruled-line [`RuledLattice`] and the block's text
+/// rows. Each text line maps to the lattice row band it sits in and each cell to
+/// the column its left edge anchors; `colspan`/`rowspan` come from *missing*
+/// interior ruled lines (a cell merges across boundaries the ruling omits). This
+/// is the only path that recovers true `rowspan`. Returns `None` if no text
+/// lands in the grid.
+fn build_ruled_table(rows: &[RowCells], lattice: &RuledLattice) -> Option<Table> {
+    let cols = lattice.col_x.len() - 1; // boundaries -> cells
+    let n_rows = lattice.row_y.len() - 1;
+    if cols == 0 || n_rows == 0 {
+        return None;
+    }
+    let col_x = &lattice.col_x;
+    let row_y = &lattice.row_y; // descending
+
+    let mut occupied: HashSet<(usize, usize)> = HashSet::new();
+    let mut cell_at: HashMap<(usize, usize), GridCell> = HashMap::new();
+
+    for line in rows {
+        // The lattice row band whose [top, bottom) contains this line's baseline.
+        // A line is allowed to sit exactly on the bottom rule of the last band.
+        // A line outside the lattice's row extent means the ruling didn't cover
+        // all of this (already-promoted) table's text; `?` bails so the caller
+        // falls back to the text-gap grid rather than emit a grid missing rows.
+        let r = (0..n_rows).find(|&i| {
+            line.y <= row_y[i]
+                && (line.y > row_y[i + 1] || (i + 1 == n_rows && line.y >= row_y[i + 1]))
+        })?;
+        for cell in &line.cells {
+            // Starting column: the rightmost boundary at or left of the cell's
+            // left edge (left-edge anchoring, like the gap path).
+            let mut c = (0..cols)
+                .rev()
+                .find(|&i| col_x[i] <= cell.x0 + 3.0)
+                .unwrap_or(0);
+            while occupied.contains(&(r, c)) && c + 1 < cols {
+                c += 1;
+            }
+            // colspan: extend while the next interior vertical boundary is NOT ruled.
+            let mut colspan = 1usize;
+            while c + colspan < cols {
+                let x = col_x[c + colspan];
+                if lattice.vertical_present(x, row_y[r], row_y[r + 1]) {
+                    break;
+                }
+                colspan += 1;
+            }
+            colspan = colspan.min(cols - c).clamp(1, MAX_SPAN);
+            // rowspan: extend while the next interior horizontal boundary is NOT
+            // ruled across the (now-known) column extent of the cell.
+            let (cl, cr) = (col_x[c], col_x[(c + colspan).min(cols)]);
+            let mut rowspan = 1usize;
+            while r + rowspan < n_rows {
+                let y = row_y[r + rowspan];
+                if lattice.horizontal_present(y, cl, cr) {
+                    break;
+                }
+                rowspan += 1;
+            }
+            rowspan = rowspan.min(n_rows - r).clamp(1, MAX_SPAN);
+
+            let bbox = [cl, row_y[(r + rowspan).min(n_rows)], cr, row_y[r]];
+            match cell_at.get_mut(&(r, c)) {
+                Some(g) => {
+                    // Two text cells in one lattice cell: keep both.
+                    g.text.push(' ');
+                    g.text.push_str(&cell.text);
+                }
+                None => {
+                    cell_at.insert(
+                        (r, c),
+                        GridCell {
+                            text: cell.text.clone(),
+                            bbox,
+                            col: c,
+                            colspan,
+                            rowspan,
+                        },
+                    );
+                    for dr in 0..rowspan {
+                        for dc in 0..colspan {
+                            if dr > 0 || dc > 0 {
+                                occupied.insert((r + dr, c + dc));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if cell_at.is_empty() {
+        return None;
+    }
+
+    let grid: Vec<Vec<GridCell>> = (0..n_rows)
+        .map(|r| {
+            (0..cols)
+                .map(|c| {
+                    cell_at.get(&(r, c)).cloned().unwrap_or(GridCell {
+                        text: String::new(),
+                        bbox: [col_x[c], row_y[r + 1], col_x[c + 1], row_y[r]],
+                        col: c,
+                        colspan: 1,
+                        rowspan: 1,
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
+    Some(Table {
+        columns: cols,
+        header_rows: 1,
+        rows: grid,
     })
 }
 

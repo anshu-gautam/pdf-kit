@@ -76,4 +76,12 @@ impl Matrix {
     pub(crate) fn horizontal_scale(&self) -> f32 {
         (self.a * self.a + self.b * self.b).sqrt()
     }
+
+    /// Map a point `(x, y)` through the transform (row-vector convention).
+    pub(crate) fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
 }

@@ -856,6 +856,60 @@ pub fn tagged_table() -> Vec<u8> {
     to_bytes(doc)
 }
 
+/// An untagged page drawing a ruled 2-column table whose top row is a single
+/// cell spanning both columns. The grid lines run x = 72/250/430 (two columns)
+/// and y = 712/690/670/650 (three row bands); the interior vertical line at
+/// x=250 is omitted in the top band, so the header cell spans both columns. Text
+/// rows are placed close enough (≤ ~22pt apart at 11pt) to form one block, with
+/// a wide column gap on the data rows so the text-gap table gate still promotes
+/// it (the ruled lines then refine the grid + colspan). For ruled-line span
+/// reconstruction.
+pub fn ruled_table_spanning_cell() -> Vec<u8> {
+    let line = |ops: &mut Vec<Operation>, x0: f32, y0: f32, x1: f32, y1: f32| {
+        ops.push(Operation::new("m", vec![x0.into(), y0.into()]));
+        ops.push(Operation::new("l", vec![x1.into(), y1.into()]));
+        ops.push(Operation::new("S", vec![]));
+    };
+    let text = |ops: &mut Vec<Operation>, s: &str, x: f32, y: f32| {
+        ops.push(Operation::new("BT", vec![]));
+        ops.push(Operation::new("Tf", vec!["F1".into(), 11_i64.into()]));
+        ops.push(Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                x.into(),
+                y.into(),
+            ],
+        ));
+        ops.push(Operation::new("Tj", vec![Object::string_literal(s)]));
+        ops.push(Operation::new("ET", vec![]));
+    };
+
+    let mut ops: Vec<Operation> = Vec::new();
+    // Horizontal rules at the four row boundaries (full width).
+    for y in [712.0f32, 690.0, 670.0, 650.0] {
+        line(&mut ops, 72.0, y, 430.0, y);
+    }
+    // Outer verticals span the whole table; the middle vertical (x=250) only
+    // rules the two DATA bands (y 650..690), leaving the header row unsplit.
+    line(&mut ops, 72.0, 650.0, 72.0, 712.0);
+    line(&mut ops, 430.0, 650.0, 430.0, 712.0);
+    line(&mut ops, 250.0, 650.0, 250.0, 690.0);
+
+    // Text rows ~20pt apart so they group into one block; spanning header, then
+    // two 2-column data rows (wide gap at x~250).
+    text(&mut ops, "Header", 80.0, 696.0);
+    text(&mut ops, "Ada", 80.0, 676.0);
+    text(&mut ops, "Engineer", 258.0, 676.0);
+    text(&mut ops, "Linus", 80.0, 656.0);
+    text(&mut ops, "Systems", 258.0, 656.0);
+
+    to_bytes(assemble("Ruled Table Fixture", "pdfkit", ops, vec![]))
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {
