@@ -38,10 +38,18 @@ fn tagged_document_chunks_from_the_structure_tree() {
     assert_eq!(chunks[2].kind, ElementKind::Figure);
     assert_eq!(chunks[2].text, "A pie chart");
 
-    // Tagged chunks have no measured bbox (documented), but page + char spans
-    // still locate them.
-    assert!(chunks.iter().all(|c| c.bbox.is_none()));
+    // Tagged chunks now carry a measured bbox derived from their marked-content
+    // runs (each MCID is positioned via a Tm in the fixture), plus page.
     assert!(chunks.iter().all(|c| c.page == 1));
+    for c in &chunks {
+        let bbox = c
+            .bbox
+            .unwrap_or_else(|| panic!("tagged chunk has a bbox: {c:?}"));
+        assert!(
+            bbox[0] < bbox[2] && bbox[1] < bbox[3],
+            "ordered bbox: {bbox:?}"
+        );
+    }
 }
 
 #[test]

@@ -9,6 +9,7 @@ fn run(text: &str, x0: f32, y: f32, x1: f32, size: f32) -> TextRun {
         text: text.to_string(),
         bbox: [x0, y, x1, y + size],
         font_size: size,
+        mcid: None,
     }
 }
 
