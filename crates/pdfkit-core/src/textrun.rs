@@ -42,14 +42,13 @@ struct FontMetrics {
 }
 
 impl FontMetrics {
-    /// Advance width (1/1000 em) for a one-byte character code.
+    /// Advance width (1/1000 em) for a one-byte character code. A width of 0 is
+    /// a legitimate value (e.g. combining marks) and is returned as-is; the
+    /// default is only used when the code is outside the `/Widths` range.
     fn width(&self, code: i64) -> f32 {
         if code >= self.first_char {
-            let idx = (code - self.first_char) as usize;
-            if let Some(&w) = self.widths.get(idx) {
-                if w > 0.0 {
-                    return w;
-                }
+            if let Some(&w) = self.widths.get((code - self.first_char) as usize) {
+                return w;
             }
         }
         self.default_width
@@ -207,8 +206,22 @@ fn font_metrics(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, FontMetrics
         if is_type0 {
             continue; // composite fonts use 2-byte codes; estimate instead
         }
+        // Map every element to a width, resolving indirect references and using
+        // 0.0 for any non-numeric entry, so indices stay aligned with char codes
+        // (filter_map would silently shift every later width).
         let widths: Vec<f32> = deref_array(doc, font.get(b"Widths").ok())
-            .map(|arr| arr.iter().filter_map(|o| o.as_float().ok()).collect())
+            .map(|arr| {
+                arr.iter()
+                    .map(|o| match o {
+                        Object::Reference(id) => doc
+                            .get_object(*id)
+                            .ok()
+                            .and_then(|x| x.as_float().ok())
+                            .unwrap_or(0.0),
+                        other => other.as_float().unwrap_or(0.0),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         if widths.is_empty() {
             continue; // e.g. base-14 fonts with built-in metrics
@@ -348,7 +361,9 @@ fn reflow(runs: Vec<TextRun>) -> String {
                     line.text.push(' ');
                 }
                 line.text.push_str(&r.text);
-                line.x1 = x1;
+                // Running max keeps x1 monotonic so an out-of-order run can't
+                // shrink it (which would inflate the next gap) or make x1 < x0.
+                line.x1 = line.x1.max(x1);
                 line.size = line.size.max(size);
             }
             None => lines.push(LineAcc {
