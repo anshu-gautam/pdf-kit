@@ -986,6 +986,7 @@ name = "pdfkit-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "pdfkit-chunk",
  "pdfkit-core",
  "pdfkit-fixtures",
  "pdfkit-render",

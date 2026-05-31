@@ -92,6 +92,69 @@ fn missing_args_exits_two() {
 }
 
 #[test]
+fn chunk_json_is_valid_array_with_provenance() {
+    let file = temp("chunk-json.pdf", &pdfkit_fixtures::multi_heading());
+    let out = bin()
+        .arg("chunk")
+        .arg(&file)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "exit {:?}", out.status.code());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
+    let arr = value.as_array().expect("json array of chunks");
+    assert!(!arr.is_empty());
+    let first = &arr[0];
+    for key in [
+        "id",
+        "text",
+        "page",
+        "kind",
+        "heading_path",
+        "char_start",
+        "char_len",
+    ] {
+        assert!(first.get(key).is_some(), "chunk missing {key}: {first}");
+    }
+}
+
+#[test]
+fn chunk_markdown_renders_headings() {
+    let file = temp("chunk-md.pdf", &pdfkit_fixtures::multi_heading());
+    let out = bin()
+        .arg("chunk")
+        .arg(&file)
+        .arg("--format")
+        .arg("md")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let md = String::from_utf8_lossy(&out.stdout);
+    assert!(md.contains("# Chapter One"), "markdown: {md}");
+    assert!(md.contains("Alpha body"));
+}
+
+#[test]
+fn chunk_text_is_reading_order_plain_text() {
+    let file = temp("chunk-text.pdf", &pdfkit_fixtures::multi_heading());
+    let out = bin()
+        .arg("chunk")
+        .arg(&file)
+        .arg("--format")
+        .arg("text")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Chapter One"));
+    assert!(
+        !text.contains('#'),
+        "plain text must not have markdown markers: {text}"
+    );
+}
+
+#[test]
 fn render_out_of_range_page_errors() {
     let file = temp("born-range.pdf", &pdfkit_fixtures::born_digital());
     let out = bin()
