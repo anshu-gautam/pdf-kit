@@ -242,7 +242,7 @@ pub(crate) fn text_runs_from_content(
 }
 
 /// Build a map of font resource name -> text encoding for the page's fonts.
-fn font_encodings(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, Encoding<'_>> {
+pub(crate) fn font_encodings(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, Encoding<'_>> {
     let mut map = BTreeMap::new();
     if let Ok(fonts) = doc.get_page_fonts(page_id) {
         for (name, font) in fonts {
@@ -434,7 +434,7 @@ fn deref_dict<'a>(doc: &'a LoDoc, obj: &'a Object) -> Option<&'a Dictionary> {
 
 /// Decode a show-text byte string with the active font encoding, falling back to
 /// Latin-1 when no encoding is known or decoding fails.
-fn decode(encoding: Option<&Encoding>, bytes: &[u8]) -> String {
+pub(crate) fn decode(encoding: Option<&Encoding>, bytes: &[u8]) -> String {
     let raw = match encoding {
         Some(enc) => LoDoc::decode_text(enc, bytes).unwrap_or_else(|_| latin1(bytes)),
         None => latin1(bytes),

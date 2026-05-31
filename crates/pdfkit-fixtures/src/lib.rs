@@ -561,6 +561,137 @@ pub fn cyclic_outline() -> Vec<u8> {
     to_bytes(doc)
 }
 
+/// A minimal tagged (PDF/UA-style) single-page document: catalog `/MarkInfo
+/// /Marked true` + a `/StructTreeRoot` whose `Document` element has `H1`, `P`,
+/// and `Figure` (with `/Alt`) children, each pointing at a marked-content MCID
+/// in the page stream ("Title" / "Paragraph." / "Figure"). For structure-tree
+/// reading.
+pub fn tagged_minimal() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    let struct_root_id = doc.new_object_id();
+    let doc_elem_id = doc.new_object_id();
+    let h1_id = doc.new_object_id();
+    let p_id = doc.new_object_id();
+    let fig_id = doc.new_object_id();
+
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    // A marked-content sequence drawing `text` at `y` under tag `tag`/`mcid`.
+    let marked = |ops: &mut Vec<Operation>, tag: &str, mcid: i64, text: &str, y: f32| {
+        ops.push(Operation::new(
+            "BDC",
+            vec![
+                Object::Name(tag.as_bytes().to_vec()),
+                Object::Dictionary(dictionary! { "MCID" => mcid }),
+            ],
+        ));
+        ops.push(Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                72.0f32.into(),
+                y.into(),
+            ],
+        ));
+        ops.push(Operation::new("Tj", vec![Object::string_literal(text)]));
+        ops.push(Operation::new("EMC", vec![]));
+    };
+    let mut ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 14_i64.into()]),
+    ];
+    marked(&mut ops, "H1", 0, "Title", 700.0);
+    marked(&mut ops, "P", 1, "Paragraph.", 680.0);
+    marked(&mut ops, "Figure", 2, "Figure", 660.0);
+    ops.push(Operation::new("ET", vec![]));
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        Content { operations: ops }
+            .encode()
+            .expect("encode content stream"),
+    ));
+
+    doc.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()],
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "StructParents" => 0_i64,
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1_i64,
+        }),
+    );
+
+    let elem = |s: &str, mcid: i64| {
+        dictionary! {
+            "Type" => "StructElem",
+            "S" => s,
+            "P" => doc_elem_id,
+            "Pg" => page_id,
+            "K" => mcid,
+        }
+    };
+    doc.objects.insert(h1_id, Object::Dictionary(elem("H1", 0)));
+    doc.objects.insert(p_id, Object::Dictionary(elem("P", 1)));
+    let mut fig = elem("Figure", 2);
+    fig.set("Alt", Object::string_literal("A pie chart"));
+    doc.objects.insert(fig_id, Object::Dictionary(fig));
+    doc.objects.insert(
+        doc_elem_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructElem",
+            "S" => "Document",
+            "P" => struct_root_id,
+            "K" => vec![h1_id.into(), p_id.into(), fig_id.into()],
+        }),
+    );
+    doc.objects.insert(
+        struct_root_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructTreeRoot",
+            "K" => doc_elem_id,
+        }),
+    );
+
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "MarkInfo" => dictionary! { "Marked" => true },
+        "StructTreeRoot" => struct_root_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    let info_id = doc.add_object(dictionary! {
+        "Title" => Object::string_literal("Tagged Fixture"),
+        "Author" => Object::string_literal("pdfkit"),
+    });
+    doc.trailer.set("Info", info_id);
+    let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
+    doc.trailer
+        .set("ID", Object::Array(vec![file_id.clone(), file_id]));
+    to_bytes(doc)
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {
