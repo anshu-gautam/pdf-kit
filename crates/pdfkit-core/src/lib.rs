@@ -20,7 +20,7 @@ mod textrun;
 mod types;
 
 pub use classify::{PageKind, PageSignals};
-pub use document::{Document, Engine, Metadata, Page};
+pub use document::{Document, Engine, Link, LinkTarget, Metadata, OutlineItem, Page};
 pub use error::PdfError;
 pub use extract::{extract, ExtractOptions, ExtractResult, Mode, PdfImage, Truncated};
 pub use layout::{group_runs_into_lines, Cell, Line, COLUMN_GAP};

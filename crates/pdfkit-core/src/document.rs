@@ -3,6 +3,8 @@
 //! Public page numbers are **one-based** (PRD invariant). Internally we keep a
 //! zero-based vector of page object ids and convert at the boundary.
 
+use std::collections::HashSet;
+
 use lopdf::{Dictionary, Document as LoDoc, Object, ObjectId};
 
 use crate::classify::{self, PageKind, PageSignals};
@@ -49,19 +51,62 @@ impl Engine {
     }
 }
 
-/// Document-level metadata (PRD §4.1).
+/// Document-level metadata (PRD §4.1), from the information dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metadata {
-    /// `/Title` from the document information dictionary, if present.
+    /// `/Title`, if present.
     pub title: Option<String>,
-    /// `/Author` from the document information dictionary, if present.
+    /// `/Author`, if present.
     pub author: Option<String>,
+    /// `/Subject`, if present.
+    pub subject: Option<String>,
+    /// `/Keywords`, if present.
+    pub keywords: Option<String>,
+    /// `/Creator` (the authoring app), if present.
+    pub creator: Option<String>,
+    /// `/Producer` (the PDF library), if present.
+    pub producer: Option<String>,
+    /// `/CreationDate`, raw PDF date string (e.g. `"D:20240101120000Z"`).
+    pub creation_date: Option<String>,
+    /// `/ModDate`, raw PDF date string.
+    pub mod_date: Option<String>,
     /// Number of pages.
     pub page_count: usize,
     /// The PDF version string from the header (e.g. `"1.7"`).
     pub pdf_version: String,
     /// Whether the document was encrypted when it was opened.
     pub encrypted: bool,
+}
+
+/// A bookmark / table-of-contents entry. One-based `page` is `None` when the
+/// destination can't be resolved to a page in this document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineItem {
+    /// The bookmark label.
+    pub title: String,
+    /// The one-based page the bookmark points at, if resolvable.
+    pub page: Option<usize>,
+    /// Nested child bookmarks.
+    pub children: Vec<OutlineItem>,
+}
+
+/// Where a link annotation points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An external URI.
+    Uri(String),
+    /// A one-based page in this document.
+    Page(usize),
+}
+
+/// A link annotation on a page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    /// Clickable rectangle `[x0, y0, x1, y1]` in points (normalized so
+    /// `x0 <= x1`, `y0 <= y1`).
+    pub rect: [f32; 4],
+    /// The link destination.
+    pub target: LinkTarget,
 }
 
 /// An opened PDF document. Owns the parsed `lopdf` document.
@@ -193,6 +238,253 @@ impl Document {
             Err(_) => obj,
         }
     }
+
+    /// The document outline (bookmarks / table of contents) as a tree, in order.
+    /// Empty when the document has none. Best-effort: an entry whose destination
+    /// can't be resolved still appears, with `page == None`.
+    pub fn outline(&self) -> Vec<OutlineItem> {
+        let Ok(catalog) = self.inner.catalog() else {
+            return Vec::new();
+        };
+        let first = catalog
+            .get(b"Outlines")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+            .and_then(|id| self.inner.get_dictionary(id).ok())
+            .and_then(|root| root.get(b"First").ok())
+            .and_then(|o| o.as_reference().ok());
+        let mut visited = HashSet::new();
+        self.outline_siblings(first, &mut visited, 0)
+    }
+
+    /// Walk a `/First`-then-`/Next` sibling chain into [`OutlineItem`]s, recursing
+    /// into `/First` for children. The shared `visited` set and depth cap make a
+    /// malformed (cyclic) outline terminate.
+    fn outline_siblings(
+        &self,
+        mut next: Option<ObjectId>,
+        visited: &mut HashSet<ObjectId>,
+        depth: usize,
+    ) -> Vec<OutlineItem> {
+        let mut items = Vec::new();
+        if depth > 32 {
+            return items;
+        }
+        while let Some(id) = next {
+            if !visited.insert(id) {
+                break; // cycle
+            }
+            let Ok(dict) = self.inner.get_dictionary(id) else {
+                break;
+            };
+            let title = self.dict_text(dict, b"Title").unwrap_or_default();
+            let page = self.resolve_dest_page(dict);
+            let child_first = dict.get(b"First").ok().and_then(|o| o.as_reference().ok());
+            let children = self.outline_siblings(child_first, visited, depth + 1);
+            items.push(OutlineItem {
+                title,
+                page,
+                children,
+            });
+            next = dict.get(b"Next").ok().and_then(|o| o.as_reference().ok());
+        }
+        items
+    }
+
+    /// Resolve an outline/link dict's destination (`/Dest`, or a `GoTo` `/A`) to
+    /// a one-based page number.
+    fn resolve_dest_page(&self, dict: &Dictionary) -> Option<usize> {
+        let dest: &Object = if let Ok(d) = dict.get(b"Dest") {
+            self.resolve(d)
+        } else {
+            let action = dict.get(b"A").ok().and_then(|o| self.deref_dict(o))?;
+            let is_goto = action
+                .get(b"S")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .map(|s| s == b"GoTo")
+                .unwrap_or(false);
+            if !is_goto {
+                return None;
+            }
+            self.resolve(action.get(b"D").ok()?)
+        };
+        let page_id = self.dest_page_id(dest)?;
+        self.page_number_of(page_id)
+    }
+
+    /// The page object id a (resolved) destination object points at.
+    fn dest_page_id(&self, dest: &Object) -> Option<ObjectId> {
+        match dest {
+            Object::Array(arr) => arr.first()?.as_reference().ok(),
+            Object::Name(n) => self.resolve_named_dest(n),
+            Object::String(s, _) => self.resolve_named_dest(s),
+            _ => None,
+        }
+    }
+
+    /// Resolve a named destination via the catalog's old-style `/Dests` dict or
+    /// the `/Names` -> `/Dests` name tree.
+    fn resolve_named_dest(&self, name: &[u8]) -> Option<ObjectId> {
+        let catalog = self.inner.catalog().ok()?;
+        if let Some(dests) = catalog.get(b"Dests").ok().and_then(|o| self.deref_dict(o)) {
+            if let Ok(value) = dests.get(name) {
+                if let Some(id) = self.dest_value_page_id(self.resolve(value)) {
+                    return Some(id);
+                }
+            }
+        }
+        let names = catalog
+            .get(b"Names")
+            .ok()
+            .and_then(|o| self.deref_dict(o))?;
+        let tree = names.get(b"Dests").ok().and_then(|o| self.deref_dict(o))?;
+        let mut visited = HashSet::new();
+        self.search_name_tree(tree, name, &mut visited, 0)
+    }
+
+    /// A named-destination value is either a destination array or a dict with a
+    /// `/D` destination array; either way, return its page object id.
+    fn dest_value_page_id(&self, value: &Object) -> Option<ObjectId> {
+        match value {
+            Object::Array(arr) => arr.first()?.as_reference().ok(),
+            Object::Dictionary(d) => match self.resolve(d.get(b"D").ok()?) {
+                Object::Array(arr) => arr.first()?.as_reference().ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Search a destination name tree (`/Kids` intermediate nodes, `/Names`
+    /// `[key value ...]` leaves) for `target`. Depth-bounded.
+    fn search_name_tree(
+        &self,
+        node: &Dictionary,
+        target: &[u8],
+        visited: &mut HashSet<ObjectId>,
+        depth: usize,
+    ) -> Option<ObjectId> {
+        if depth > 32 {
+            return None;
+        }
+        if let Some(names) = node.get(b"Names").ok().and_then(|o| self.deref_array(o)) {
+            let mut i = 0;
+            while i + 1 < names.len() {
+                if names[i].as_str().is_ok_and(|k| k == target) {
+                    return self.dest_value_page_id(self.resolve(&names[i + 1]));
+                }
+                i += 2;
+            }
+        }
+        if let Some(kids) = node.get(b"Kids").ok().and_then(|o| self.deref_array(o)) {
+            for kid in kids {
+                let Ok(kid_id) = kid.as_reference() else {
+                    continue;
+                };
+                // Visit each node once, so a cyclic /Kids terminates immediately
+                // (the depth cap is a secondary bound).
+                if !visited.insert(kid_id) {
+                    continue;
+                }
+                if let Ok(kid_dict) = self.inner.get_dictionary(kid_id) {
+                    if let Some(found) = self.search_name_tree(kid_dict, target, visited, depth + 1)
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The link annotations on a page object, in order. Best-effort; empty when
+    /// the page has no `/Annots`.
+    fn page_links(&self, page_id: ObjectId) -> Vec<Link> {
+        let Ok(annots) = self.inner.get_page_annotations(page_id) else {
+            return Vec::new();
+        };
+        let mut links = Vec::new();
+        for annot in annots {
+            let is_link = annot
+                .get(b"Subtype")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .map(|s| s == b"Link")
+                .unwrap_or(false);
+            if !is_link {
+                continue;
+            }
+            let (Some(rect), Some(target)) = (self.rect_of(annot), self.link_target(annot)) else {
+                continue;
+            };
+            links.push(Link { rect, target });
+        }
+        links
+    }
+
+    /// A link annotation's target: an external URI (`/A` `/S /URI`) or an
+    /// internal page (`/Dest` or a `GoTo` `/A`).
+    fn link_target(&self, annot: &Dictionary) -> Option<LinkTarget> {
+        if let Some(action) = annot.get(b"A").ok().and_then(|o| self.deref_dict(o)) {
+            let is_uri = action
+                .get(b"S")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .map(|s| s == b"URI")
+                .unwrap_or(false);
+            if is_uri {
+                let uri = action.get(b"URI").ok().and_then(|o| o.as_str().ok())?;
+                return Some(LinkTarget::Uri(String::from_utf8_lossy(uri).into_owned()));
+            }
+        }
+        self.resolve_dest_page(annot).map(LinkTarget::Page)
+    }
+
+    /// A normalized `/Rect` `[x0, y0, x1, y1]` (so `x0 <= x1`, `y0 <= y1`).
+    fn rect_of(&self, annot: &Dictionary) -> Option<[f32; 4]> {
+        let arr = annot.get(b"Rect").ok().and_then(|o| self.deref_array(o))?;
+        if arr.len() < 4 {
+            return None;
+        }
+        let n = |i: usize| self.resolve(&arr[i]).as_float().ok();
+        let (a, b, c, d) = (n(0)?, n(1)?, n(2)?, n(3)?);
+        Some([a.min(c), b.min(d), a.max(c), b.max(d)])
+    }
+
+    /// One-based page number of a page object id, if it is one of our pages.
+    fn page_number_of(&self, id: ObjectId) -> Option<usize> {
+        self.page_ids.iter().position(|&p| p == id).map(|i| i + 1)
+    }
+
+    /// Read a (possibly indirect) text-string field and decode it.
+    fn dict_text(&self, dict: &Dictionary, key: &[u8]) -> Option<String> {
+        dict.get(key)
+            .ok()
+            .map(|o| self.resolve(o))
+            .and_then(|o| o.as_str().ok())
+            .map(decode_pdf_text)
+    }
+
+    /// Dereference one level to a dictionary.
+    fn deref_dict<'a>(&'a self, obj: &'a Object) -> Option<&'a Dictionary> {
+        match obj.as_reference() {
+            Ok(id) => self.inner.get_dictionary(id).ok(),
+            Err(_) => obj.as_dict().ok(),
+        }
+    }
+
+    /// Dereference one level to an array.
+    fn deref_array<'a>(&'a self, obj: &'a Object) -> Option<&'a Vec<Object>> {
+        match obj.as_reference() {
+            Ok(id) => self
+                .inner
+                .get_object(id)
+                .ok()
+                .and_then(|o| o.as_array().ok()),
+            Err(_) => obj.as_array().ok(),
+        }
+    }
 }
 
 /// A borrowed view of a single page.
@@ -258,6 +550,11 @@ impl Page<'_> {
     pub fn text_runs(&self) -> Vec<TextRun> {
         textrun::page_text_runs(&self.doc.inner, self.id)
     }
+
+    /// Link annotations on this page (clickable rect + URI/internal-page target).
+    pub fn links(&self) -> Vec<Link> {
+        self.doc.page_links(self.id)
+    }
 }
 
 #[cfg(feature = "render-native")]
@@ -270,18 +567,6 @@ impl Page<'_> {
 }
 
 fn build_metadata(doc: &LoDoc, page_count: usize) -> Metadata {
-    let (title, author) = info_strings(doc);
-    Metadata {
-        title,
-        author,
-        page_count,
-        pdf_version: doc.version.clone(),
-        encrypted: doc.was_encrypted() || doc.is_encrypted(),
-    }
-}
-
-/// Read `/Title` and `/Author` from the document information dictionary.
-fn info_strings(doc: &LoDoc) -> (Option<String>, Option<String>) {
     let info: Option<&Dictionary> = doc.trailer.get(b"Info").ok().and_then(|o| {
         if let Ok(id) = o.as_reference() {
             doc.get_dictionary(id).ok()
@@ -294,7 +579,19 @@ fn info_strings(doc: &LoDoc) -> (Option<String>, Option<String>) {
             .and_then(|o| o.as_str().ok())
             .map(decode_pdf_text)
     };
-    (read(b"Title"), read(b"Author"))
+    Metadata {
+        title: read(b"Title"),
+        author: read(b"Author"),
+        subject: read(b"Subject"),
+        keywords: read(b"Keywords"),
+        creator: read(b"Creator"),
+        producer: read(b"Producer"),
+        creation_date: read(b"CreationDate"),
+        mod_date: read(b"ModDate"),
+        page_count,
+        pdf_version: doc.version.clone(),
+        encrypted: doc.was_encrypted() || doc.is_encrypted(),
+    }
 }
 
 /// Decode a PDF text string: UTF-16BE when it carries a BOM, otherwise treat the
@@ -302,10 +599,14 @@ fn info_strings(doc: &LoDoc) -> (Option<String>, Option<String>) {
 // TODO(design): implement the full PDFDocEncoding table for the non-BOM case.
 fn decode_pdf_text(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
-            .collect();
+        let pairs = bytes[2..].chunks_exact(2);
+        let remainder = pairs.remainder();
+        let mut units: Vec<u16> = pairs.map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        // A trailing odd byte is malformed; surface it as U+FFFD rather than
+        // silently dropping it.
+        if !remainder.is_empty() {
+            units.push(0xFFFD);
+        }
         String::from_utf16_lossy(&units)
     } else {
         bytes.iter().map(|&b| b as char).collect()
