@@ -7,7 +7,10 @@
 
 use std::cmp::Ordering;
 
-use pdfkit_core::{group_runs_into_lines, is_caption, Cell, Document, Line, PdfError, TextRun};
+use pdfkit_core::{
+    group_runs_into_lines, is_caption, Cell, Document, ImageRegion, Line, PdfError, StructNode,
+    TextRun,
+};
 
 /// The kind of a structural element a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +26,8 @@ pub enum ElementKind {
     Table,
     /// A caption (not produced in v1).
     Caption,
+    /// An image / figure region (its text is the caption or alt-text).
+    Figure,
 }
 
 /// A structured chunk of a document.
@@ -130,6 +135,22 @@ impl Default for ChunkOptions {
 
 /// Chunk a document into structured, token-sized pieces.
 pub fn chunk_document(doc: &Document, opts: &ChunkOptions) -> Result<Vec<Chunk>, PdfError> {
+    // Prefer the author's logical structure tree when the document is tagged
+    // (authoritative heading levels, reading order, table/figure structure);
+    // otherwise fall back to the geometry pipeline. Both feed the same packer.
+    let blocks = match tagged_blocks(doc) {
+        Some(blocks) => blocks,
+        None => geometry_blocks(doc)?,
+    };
+    let mut chunks = pack(blocks, opts);
+    finalize_provenance(&mut chunks, doc.metadata().title.as_deref(), opts);
+    Ok(chunks)
+}
+
+/// Geometry path: positioned runs -> lines -> blocks per page (reading order
+/// and multi-column handling live in `pdfkit-core::layout`), plus a Figure block
+/// per detected image region, ordered into the page top-to-bottom.
+fn geometry_blocks(doc: &Document) -> Result<Vec<Block>, PdfError> {
     // Pass 1: gather runs per page and the global font-size distribution.
     let mut sizes: Vec<f32> = Vec::new();
     let mut pages_runs: Vec<(usize, Vec<TextRun>)> = Vec::new();
@@ -140,18 +161,186 @@ pub fn chunk_document(doc: &Document, opts: &ChunkOptions) -> Result<Vec<Chunk>,
     }
     let body = body_size(&sizes);
 
-    // Pass 2: lines -> blocks per page, in reading order. Line grouping (and
-    // multi-column ordering) lives in pdfkit-core::layout so reflow and the
-    // chunker never disagree on line/word/column boundaries.
+    // Pass 2: lines -> blocks per page.
     let mut blocks: Vec<Block> = Vec::new();
     for (page, runs) in pages_runs {
         let lines = group_runs_into_lines(runs);
-        blocks.extend(group_blocks(lines, body, page));
+        let mut page_blocks = group_blocks(lines, body, page);
+        let figures = doc.page(page)?.image_regions();
+        if !figures.is_empty() {
+            // A figure adopts its caption as its own text; drop the standalone
+            // Caption block for that line so the caption isn't emitted twice.
+            let adopted: std::collections::HashSet<&str> = figures
+                .iter()
+                .filter_map(|f| f.caption.as_deref())
+                .collect();
+            page_blocks
+                .retain(|b| !(b.kind == ElementKind::Caption && adopted.contains(b.text.as_str())));
+            page_blocks.extend(figures.into_iter().map(|r| figure_block(r, page)));
+            // Order the page top-to-bottom (descending top edge) so each figure
+            // sits next to its caption. Only for single-column pages: re-sorting
+            // a multi-column page by top edge alone would interleave columns, so
+            // there we keep the column reading order and leave figures appended.
+            // TODO(design): per-column figure placement.
+            if page_blocks.iter().all(|b| b.column == 0) {
+                page_blocks
+                    .sort_by(|a, b| b.bbox[3].partial_cmp(&a.bbox[3]).unwrap_or(Ordering::Equal));
+            }
+        }
+        blocks.extend(page_blocks);
     }
+    Ok(blocks)
+}
 
-    let mut chunks = pack(blocks, opts);
-    finalize_provenance(&mut chunks, doc.metadata().title.as_deref(), opts);
-    Ok(chunks)
+/// A Figure block from a detected image region; its text is the paired caption.
+fn figure_block(region: ImageRegion, page: usize) -> Block {
+    let text = match region.caption {
+        Some(c) if !c.is_empty() => c,
+        _ => "[figure]".to_string(),
+    };
+    Block {
+        text,
+        page,
+        bbox: region.bbox,
+        bbox_known: true,
+        size: 1.0,
+        kind: ElementKind::Figure,
+        last_y: region.bbox[1],
+        column: 0,
+        lines: 1,
+        tabular_lines: 0,
+        gap_rows: Vec::new(),
+        rows: Vec::new(),
+        table: None,
+    }
+}
+
+/// Tagged path: build blocks from the logical structure tree, or `None` when the
+/// document isn't tagged (or the tree has no emittable content — then the caller
+/// falls back to geometry).
+fn tagged_blocks(doc: &Document) -> Option<Vec<Block>> {
+    let root = doc.structure_tree()?;
+    let mut blocks = Vec::new();
+    let mut last_page = 1usize;
+    walk_struct(&root, &mut blocks, &mut last_page);
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+/// How a (RoleMap-resolved) structure tag becomes a chunk.
+enum TagClass {
+    /// A heading at this level (1 = top); updates the breadcrumb stack in `pack`.
+    Heading(u8),
+    /// A block element: emit one chunk aggregating its whole subtree's text.
+    Block(ElementKind),
+    /// A grouping element: descend without emitting (its content is its children).
+    Grouping,
+}
+
+/// Classify a standard structure type. Unknown/custom tags group (descend) so
+/// their descendants' text is never dropped and no boundary is invented.
+fn classify_tag(tag: &str) -> TagClass {
+    match tag {
+        "H1" => TagClass::Heading(1),
+        "H2" => TagClass::Heading(2),
+        "H3" => TagClass::Heading(3),
+        "H4" => TagClass::Heading(4),
+        "H5" => TagClass::Heading(5),
+        "H6" => TagClass::Heading(6),
+        // An untiered `H` is the document's sole heading tier -> top level.
+        "H" => TagClass::Heading(1),
+        "P" => TagClass::Block(ElementKind::Paragraph),
+        "L" => TagClass::Block(ElementKind::List),
+        "Table" => TagClass::Block(ElementKind::Table),
+        "Figure" => TagClass::Block(ElementKind::Figure),
+        "Caption" => TagClass::Block(ElementKind::Caption),
+        "Formula" | "BlockQuote" | "Quote" | "Note" | "Reference" | "BibEntry" => {
+            TagClass::Block(ElementKind::Paragraph)
+        }
+        _ => TagClass::Grouping,
+    }
+}
+
+/// Walk the structure tree in reading order, emitting one block per heading /
+/// block element. `pack` derives the heading breadcrumb from the emitted Heading
+/// blocks' sizes, so headings carry a size of `7 - level` (H1 highest).
+fn walk_struct(node: &StructNode, blocks: &mut Vec<Block>, last_page: &mut usize) {
+    // An unpositioned element takes the last seen page (its neighbors'), rather
+    // than colliding on page 1.
+    if let Some(p) = node.page {
+        *last_page = p;
+    }
+    let page = node.page.unwrap_or(*last_page);
+    match classify_tag(&node.tag) {
+        TagClass::Heading(level) => {
+            blocks.push(struct_block(
+                aggregate(node),
+                ElementKind::Heading,
+                page,
+                7.0 - f32::from(level),
+            ));
+        }
+        TagClass::Block(kind) => {
+            blocks.push(struct_block(block_text(node, kind), kind, page, 1.0));
+        }
+        TagClass::Grouping => {
+            for child in &node.children {
+                walk_struct(child, blocks, last_page);
+            }
+        }
+    }
+}
+
+/// Text for a block element: a Figure prefers its alt-text; everything else
+/// aggregates its subtree.
+fn block_text(node: &StructNode, kind: ElementKind) -> String {
+    if kind == ElementKind::Figure {
+        if let Some(alt) = node.alt.as_deref().filter(|a| !a.is_empty()) {
+            return alt.to_string();
+        }
+        let text = aggregate(node);
+        return if text.is_empty() {
+            "[figure]".to_string()
+        } else {
+            text
+        };
+    }
+    aggregate(node)
+}
+
+/// A structure element's full text: its own marked-content text plus all
+/// descendants', in tree (reading) order, joined by newlines.
+fn aggregate(node: &StructNode) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !node.text.is_empty() {
+        parts.push(node.text.clone());
+    }
+    for child in &node.children {
+        let child_text = aggregate(child);
+        if !child_text.is_empty() {
+            parts.push(child_text);
+        }
+    }
+    parts.join("\n")
+}
+
+/// A block from the tagged path: no measured bbox (page + char offsets locate
+/// it). `size` is the heading-stack key for `pack` (ignored for non-headings).
+fn struct_block(text: String, kind: ElementKind, page: usize, size: f32) -> Block {
+    Block {
+        text,
+        page,
+        bbox: [0.0; 4],
+        bbox_known: false,
+        size,
+        kind,
+        last_y: 0.0,
+        column: 0,
+        lines: 1,
+        tabular_lines: 0,
+        gap_rows: Vec::new(),
+        rows: Vec::new(),
+        table: None,
+    }
 }
 
 /// Fill in the cross-chunk fields once the chunk sequence is final: the exact
@@ -216,6 +405,7 @@ fn kind_tag(kind: ElementKind) -> &'static str {
         ElementKind::List => "list",
         ElementKind::Table => "table",
         ElementKind::Caption => "caption",
+        ElementKind::Figure => "figure",
     }
 }
 
@@ -273,7 +463,9 @@ pub fn to_markdown(chunks: &[Chunk]) -> String {
                 out.push(' ');
                 out.push_str(&escape_block_markers(chunk.text.trim()));
             }
-            ElementKind::Caption => {
+            // Captions and figures render as an italic line (a figure's text is
+            // its caption / alt-text).
+            ElementKind::Caption | ElementKind::Figure => {
                 out.push('*');
                 out.push_str(chunk.text.trim());
                 out.push('*');
@@ -505,6 +697,10 @@ struct Block {
     text: String,
     page: usize,
     bbox: [f32; 4],
+    /// Whether `bbox` is a real measured box. Geometry blocks always have one;
+    /// tagged-structure blocks don't carry positions, so their chunks get
+    /// `bbox: None` (page + char offsets still locate them).
+    bbox_known: bool,
     size: f32,
     kind: ElementKind,
     last_y: f32,
@@ -571,6 +767,7 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
             blocks.push(Block {
                 page,
                 bbox: [line.x0, line.y, line.x1, line.y + line.size],
+                bbox_known: true,
                 size: line.size,
                 kind,
                 last_y: line.y,
@@ -848,6 +1045,7 @@ struct Acc {
     kind: ElementKind,
     heading_path: Vec<String>,
     bbox: [f32; 4],
+    bbox_known: bool,
     table: Option<Table>,
 }
 
@@ -859,7 +1057,7 @@ impl Acc {
             text: self.text,
             context: None,
             page: self.page,
-            bbox: Some(self.bbox),
+            bbox: self.bbox_known.then_some(self.bbox),
             kind: self.kind,
             heading_path: self.heading_path,
             char_start: 0,
@@ -892,7 +1090,7 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                 text: block.text.clone(),
                 context: None,
                 page: block.page,
-                bbox: Some(block.bbox),
+                bbox: block.bbox_known.then_some(block.bbox),
                 kind: ElementKind::Heading,
                 heading_path: path,
                 char_start: 0,
@@ -943,7 +1141,14 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                 c.text.push('\n');
                 c.text.push_str(&block.text);
                 c.tokens += block_tokens;
-                c.bbox = union(c.bbox, block.bbox);
+                if block.bbox_known {
+                    c.bbox = if c.bbox_known {
+                        union(c.bbox, block.bbox)
+                    } else {
+                        block.bbox
+                    };
+                    c.bbox_known = true;
+                }
             }
             None => {
                 let text = match overlap_seed {
@@ -962,6 +1167,7 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                     kind: block.kind,
                     heading_path: path,
                     bbox: block.bbox,
+                    bbox_known: block.bbox_known,
                     // The grid belongs to this (table) block; on a later merge we
                     // keep this first grid.
                     table: block.table,
@@ -1042,5 +1248,73 @@ mod tests {
         assert!(!is_caption("Table 1 shows the results below."));
         assert!(!is_caption("The table below lists the fields."));
         assert!(!is_caption("Figure out the answer before proceeding."));
+    }
+
+    #[test]
+    fn tag_classification() {
+        use super::{classify_tag, ElementKind, TagClass};
+        assert!(matches!(classify_tag("H1"), TagClass::Heading(1)));
+        assert!(matches!(classify_tag("H6"), TagClass::Heading(6)));
+        assert!(matches!(classify_tag("H"), TagClass::Heading(1)));
+        assert!(matches!(
+            classify_tag("P"),
+            TagClass::Block(ElementKind::Paragraph)
+        ));
+        assert!(matches!(
+            classify_tag("Table"),
+            TagClass::Block(ElementKind::Table)
+        ));
+        assert!(matches!(
+            classify_tag("Figure"),
+            TagClass::Block(ElementKind::Figure)
+        ));
+        assert!(matches!(
+            classify_tag("Caption"),
+            TagClass::Block(ElementKind::Caption)
+        ));
+        assert!(matches!(classify_tag("Document"), TagClass::Grouping));
+        assert!(matches!(classify_tag("CustomWidget"), TagClass::Grouping));
+    }
+
+    #[test]
+    fn aggregate_collects_subtree_text_in_order() {
+        use super::aggregate;
+        use pdfkit_core::StructNode;
+        let cell = |t: &str| StructNode {
+            tag: "TD".into(),
+            raw_tag: "TD".into(),
+            text: t.into(),
+            alt: None,
+            page: Some(1),
+            children: Vec::new(),
+        };
+        let row = StructNode {
+            tag: "TR".into(),
+            raw_tag: "TR".into(),
+            text: String::new(),
+            alt: None,
+            page: Some(1),
+            children: vec![cell("A"), cell("B")],
+        };
+        let table = StructNode {
+            tag: "Table".into(),
+            raw_tag: "Table".into(),
+            text: String::new(),
+            alt: None,
+            page: Some(1),
+            children: vec![row],
+        };
+        // Container's own text is empty; descendants collected in tree order.
+        assert_eq!(aggregate(&table), "A\nB");
+
+        let empty = StructNode {
+            tag: "P".into(),
+            raw_tag: "P".into(),
+            text: String::new(),
+            alt: None,
+            page: None,
+            children: Vec::new(),
+        };
+        assert_eq!(aggregate(&empty), "");
     }
 }
