@@ -23,7 +23,7 @@ pub use classify::{PageKind, PageSignals};
 pub use document::{Document, Engine, Metadata, Page};
 pub use error::PdfError;
 pub use extract::{extract, ExtractOptions, ExtractResult, Mode, PdfImage, Truncated};
-pub use layout::{group_runs_into_lines, Line, COLUMN_GAP};
+pub use layout::{group_runs_into_lines, Cell, Line, COLUMN_GAP};
 pub use ocr::{ocr_page, OcrProvider, OcrResult, OcrWord};
 pub use render::{Background, Bitmap, RenderOptions, Renderer};
 pub use textrun::TextRun;

@@ -22,6 +22,19 @@ use std::cmp::Ordering;
 
 use crate::textrun::TextRun;
 
+/// One column segment of a line: the text between two column separators, with
+/// its horizontal extent. A line with no column gaps has a single cell spanning
+/// the whole line. Used by the chunker to reconstruct table grids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cell {
+    /// The cell text (words joined with spaces, no column tabs).
+    pub text: String,
+    /// Left edge x in points.
+    pub x0: f32,
+    /// Right edge x in points.
+    pub x1: f32,
+}
+
 /// A run of text grouped into a single visual line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
@@ -39,6 +52,10 @@ pub struct Line {
     /// the chunker to detect *aligned* table columns. Its length equals the
     /// number of column separators on the line.
     pub gap_xs: Vec<f32>,
+    /// The line split at its column separators (`gap_xs.len() + 1` cells). A
+    /// purely additive view — `text`/`gap_xs` are unchanged — so reflow and
+    /// table detection are untouched while the chunker can rebuild a cell grid.
+    pub cells: Vec<Cell>,
     /// Index of the column band this line belongs to (0 for single-column
     /// pages — then all the column-aware logic in consumers is a no-op).
     pub column: usize,
@@ -326,17 +343,35 @@ fn bucket_region(runs: Vec<TextRun>, column: usize) -> Vec<Line> {
                 let gap = x0 - line.x1;
                 let unit = line.size.max(size);
                 if gap > unit * COLUMN_GAP {
-                    // Column separator: tab in the text, record the gap center.
+                    // Column separator: tab in the text, record the gap center,
+                    // and start a new cell.
                     line.gap_xs.push((line.x1 + x0) * 0.5);
                     line.text.push('\t');
-                } else if !line.text.is_empty()
-                    && !line.text.ends_with([' ', '\t'])
-                    && !r.text.starts_with(' ')
-                    && gap > unit * WORD_GAP
-                {
-                    line.text.push(' ');
+                    line.text.push_str(&r.text);
+                    line.cells.push(Cell {
+                        text: r.text,
+                        x0,
+                        x1,
+                    });
+                } else {
+                    let need_space = !line.text.is_empty()
+                        && !line.text.ends_with([' ', '\t'])
+                        && !r.text.starts_with(' ')
+                        && gap > unit * WORD_GAP;
+                    if need_space {
+                        line.text.push(' ');
+                    }
+                    line.text.push_str(&r.text);
+                    // Append to the open (last) cell, keeping it in lockstep with
+                    // `text`; a line always has at least one cell (seeded below).
+                    if let Some(cell) = line.cells.last_mut() {
+                        if need_space {
+                            cell.text.push(' ');
+                        }
+                        cell.text.push_str(&r.text);
+                        cell.x1 = cell.x1.max(x1);
+                    }
                 }
-                line.text.push_str(&r.text);
                 line.x0 = line.x0.min(x0);
                 // Running max keeps x1 monotonic so an out-of-order run can't
                 // shrink it (inflating the next gap) or make x1 < x0.
@@ -344,12 +379,17 @@ fn bucket_region(runs: Vec<TextRun>, column: usize) -> Vec<Line> {
                 line.size = line.size.max(size);
             }
             None => lines.push(Line {
-                text: r.text,
+                text: r.text.clone(),
                 y,
                 x0,
                 x1,
                 size,
                 gap_xs: Vec::new(),
+                cells: vec![Cell {
+                    text: r.text,
+                    x0,
+                    x1,
+                }],
                 column,
             }),
         }

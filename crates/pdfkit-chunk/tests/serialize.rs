@@ -109,6 +109,7 @@ fn markdown_escapes_leading_markers_in_prose() {
         char_start: 0,
         char_len: 0,
         token_estimate: 1,
+        table: None,
     };
     let md = to_markdown(std::slice::from_ref(&para));
     assert!(md.contains("\\# Not a heading"), "leading # escaped: {md}");

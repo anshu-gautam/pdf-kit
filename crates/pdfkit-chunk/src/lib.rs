@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 
-use pdfkit_core::{group_runs_into_lines, Document, Line, PdfError, TextRun};
+use pdfkit_core::{group_runs_into_lines, Cell, Document, Line, PdfError, TextRun};
 
 /// The kind of a structural element a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,6 +56,48 @@ pub struct Chunk {
     pub char_len: usize,
     /// Approximate token count.
     pub token_estimate: usize,
+    /// The reconstructed cell grid, present only for [`ElementKind::Table`]
+    /// chunks. The lossless representation of the table (Markdown/CSV flatten
+    /// spans).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub table: Option<Table>,
+}
+
+/// A normalized table: a rectangular grid of [`GridCell`]s in reading order.
+///
+/// Column geometry is inferred from text-gap alignment (no ruled-line parsing
+/// yet), so spans are limited: `colspan` is detected from a cell's horizontal
+/// overlap with the column slots; `rowspan` is always 1 (true row spans need
+/// vector-graphics rules — `TODO(design)`). The first row is treated as the
+/// header.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Table {
+    /// Number of columns (grid width). Every row has exactly this many cells.
+    pub columns: usize,
+    /// Number of leading header rows (1 by the first-row heuristic).
+    pub header_rows: usize,
+    /// Rows of cells, top to bottom; each row has `columns` cells.
+    pub rows: Vec<Vec<GridCell>>,
+}
+
+/// One cell of a [`Table`] grid.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GridCell {
+    /// The cell text (empty for a slot no run landed in).
+    pub text: String,
+    /// Bounding box `[x0, y0, x1, y1]` in points.
+    pub bbox: [f32; 4],
+    /// Zero-based column index of the cell's left edge.
+    pub col: usize,
+    /// Number of columns the cell spans (>= 1).
+    pub colspan: usize,
+    /// Number of rows the cell spans (always 1 for now).
+    pub rowspan: usize,
 }
 
 /// Options controlling chunk packing.
@@ -236,7 +278,10 @@ pub fn to_markdown(chunks: &[Chunk]) -> String {
                 out.push_str(chunk.text.trim());
                 out.push('*');
             }
-            ElementKind::Table => out.push_str(&table_to_markdown(&chunk.text)),
+            ElementKind::Table => match &chunk.table {
+                Some(table) => out.push_str(&grid_to_markdown(table)),
+                None => out.push_str(&table_to_markdown(&chunk.text)),
+            },
             // List text is rendered verbatim so its leading bullet/number
             // markers survive; prose has its leading markers escaped so extracted
             // content isn't misread as Markdown structure.
@@ -286,6 +331,147 @@ fn table_to_markdown(text: &str) -> String {
     out
 }
 
+/// Render a table grid as a GitHub-flavored Markdown pipe table (first row as
+/// header). GFM cannot express spans, so a spanning cell's text lands in its
+/// first column and the spanned-over columns render blank — use [`Table::to_html`]
+/// or the JSON grid for lossless spans.
+fn grid_to_markdown(table: &Table) -> String {
+    if table.columns == 0 || table.rows.is_empty() {
+        return String::new();
+    }
+    let render = |row: &[GridCell]| -> String {
+        let mut s = String::new();
+        for c in 0..table.columns {
+            let cell = row.get(c).map(|g| g.text.as_str()).unwrap_or("");
+            s.push_str("| ");
+            s.push_str(&cell.replace('|', "\\|"));
+            s.push(' ');
+        }
+        s.push('|');
+        s
+    };
+    let mut out = render(&table.rows[0]);
+    out.push_str("\n|");
+    for _ in 0..table.columns {
+        out.push_str(" --- |");
+    }
+    for row in &table.rows[1..] {
+        out.push('\n');
+        out.push_str(&render(row));
+    }
+    out
+}
+
+impl Table {
+    /// Render as an HTML `<table>` (header rows in `<thead>`), the lossless
+    /// textual form — `colspan`/`rowspan` are emitted when > 1. Cell text is
+    /// HTML-escaped.
+    pub fn to_html(&self) -> String {
+        let header_rows = self.header_rows.min(self.rows.len());
+        let mut out = String::from("<table>");
+        if header_rows > 0 {
+            out.push_str("<thead>");
+            for row in &self.rows[..header_rows] {
+                out.push_str(&row_html(row, "th"));
+            }
+            out.push_str("</thead>");
+        }
+        if self.rows.len() > header_rows {
+            out.push_str("<tbody>");
+            for row in &self.rows[header_rows..] {
+                out.push_str(&row_html(row, "td"));
+            }
+            out.push_str("</tbody>");
+        }
+        out.push_str("</table>");
+        out
+    }
+
+    /// Render as RFC 4180 CSV (one record per row, `columns` fields each). Spans
+    /// are flattened: a spanning cell's text is in its starting column and the
+    /// spanned-over columns are empty.
+    pub fn to_csv(&self) -> String {
+        let mut out = String::new();
+        for (ri, row) in self.rows.iter().enumerate() {
+            if ri > 0 {
+                out.push('\n');
+            }
+            for c in 0..self.columns {
+                if c > 0 {
+                    out.push(',');
+                }
+                let text = row.get(c).map(|g| g.text.as_str()).unwrap_or("");
+                out.push_str(&csv_field(text));
+            }
+        }
+        out
+    }
+}
+
+/// One HTML table row. A lead cell is emitted with its `colspan`; the empty
+/// filler slots it covers are skipped (keeping the column count consistent).
+/// A covered slot that nonetheless carries text (a collision on a malformed
+/// table) is still emitted as its own cell rather than silently dropped.
+fn row_html(row: &[GridCell], tag: &str) -> String {
+    let mut s = String::from("<tr>");
+    let mut covered_until = 0usize;
+    for (col, cell) in row.iter().enumerate() {
+        // Skip only an *empty* slot already covered by a preceding colspan.
+        if col < covered_until && cell.text.is_empty() {
+            continue;
+        }
+        let span = if col >= covered_until {
+            cell.colspan.max(1)
+        } else {
+            1 // covered-but-non-empty: emit standalone so no text is lost
+        };
+        s.push('<');
+        s.push_str(tag);
+        if span > 1 {
+            s.push_str(&format!(" colspan=\"{span}\""));
+        }
+        if cell.rowspan > 1 {
+            s.push_str(&format!(" rowspan=\"{}\"", cell.rowspan));
+        }
+        s.push('>');
+        s.push_str(&html_escape(&cell.text));
+        s.push_str("</");
+        s.push_str(tag);
+        s.push('>');
+        if col >= covered_until {
+            covered_until = col + span;
+        }
+    }
+    s.push_str("</tr>");
+    s
+}
+
+/// HTML-escape the five significant characters.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Quote a CSV field per RFC 4180 when it contains a comma, quote, newline, or
+/// leading/trailing whitespace; internal quotes are doubled.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) || s != s.trim() {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 /// Serialize chunks to pretty JSON. Requires the `serde` feature.
 #[cfg(feature = "serde")]
 pub fn to_json(chunks: &[Chunk]) -> Result<String, PdfError> {
@@ -308,6 +494,13 @@ fn body_size(sizes: &[f32]) -> f32 {
         .unwrap_or(12.0)
 }
 
+/// One merged line's cells, with the line's baseline and size (for cell bboxes).
+struct RowCells {
+    y: f32,
+    size: f32,
+    cells: Vec<Cell>,
+}
+
 struct Block {
     text: String,
     page: usize,
@@ -322,6 +515,10 @@ struct Block {
     tabular_lines: usize,
     /// Per-row x-centers of the wide column gaps, for aligned-table detection.
     gap_rows: Vec<Vec<f32>>,
+    /// Per-row cells, kept so a promoted table can be turned into a grid.
+    rows: Vec<RowCells>,
+    /// The reconstructed grid, set when the block is promoted to a table.
+    table: Option<Table>,
 }
 
 /// x-positions of column gaps within this many points are treated as the same
@@ -348,6 +545,11 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
         if mergeable {
             if let Some(b) = blocks.last_mut() {
                 let row_is_tabular = !line.gap_xs.is_empty();
+                let row = RowCells {
+                    y: line.y,
+                    size: line.size,
+                    cells: line.cells,
+                };
                 b.text.push('\n');
                 b.text.push_str(&line.text);
                 b.bbox[0] = b.bbox[0].min(line.x0);
@@ -358,6 +560,7 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
                 b.lines += 1;
                 b.tabular_lines += usize::from(row_is_tabular);
                 b.gap_rows.push(line.gap_xs);
+                b.rows.push(row);
             }
         } else {
             let kind = if is_heading {
@@ -375,6 +578,12 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
                 lines: 1,
                 tabular_lines: usize::from(!line.gap_xs.is_empty()),
                 gap_rows: vec![line.gap_xs],
+                rows: vec![RowCells {
+                    y: line.y,
+                    size: line.size,
+                    cells: line.cells,
+                }],
+                table: None,
                 text: line.text,
             });
         }
@@ -395,6 +604,7 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
             && has_aligned_column(&block.gap_rows)
         {
             block.kind = ElementKind::Table;
+            block.table = build_table(&block.rows, block.bbox);
         } else if is_caption(&block.text) {
             block.kind = ElementKind::Caption;
         }
@@ -439,6 +649,141 @@ fn distinct_count(rows: &[usize]) -> usize {
     seen.sort_unstable();
     seen.dedup();
     seen.len()
+}
+
+/// Build a normalized cell grid for a promoted table block.
+///
+/// Columns are inferred by clustering cell *left edges* across rows (these are
+/// stable even when cell widths vary, unlike gap centers, which is why this is a
+/// distinct pass from the gap-center detection in [`has_aligned_column`]). Each
+/// cell is placed in the slot its x-center falls in, with `colspan` from how
+/// many slots its width covers; missing slots are filled with empty cells so the
+/// grid is rectangular. Returns `None` if no aligned columns emerge.
+fn build_table(rows: &[RowCells], bbox: [f32; 4]) -> Option<Table> {
+    let (left, right) = (bbox[0], bbox[2]);
+    // `right > left` is positive on purpose: a NaN/degenerate bbox makes it
+    // false, so we bail rather than build a bogus grid.
+    let valid = rows.len() >= 2 && right > left;
+    if !valid {
+        return None;
+    }
+    let lefts = column_lefts(rows);
+    if lefts.is_empty() {
+        return None;
+    }
+    // Slot boundaries: page-left, then each column's left edge, then page-right.
+    let mut bounds = vec![left.min(lefts[0])];
+    bounds.extend(lefts.iter().skip(1).copied());
+    bounds.push(right);
+    bounds.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    let slots: Vec<(f32, f32)> = bounds.windows(2).map(|w| (w[0], w[1])).collect();
+    let columns = slots.len();
+    if columns == 0 {
+        return None;
+    }
+
+    let grid_rows: Vec<Vec<GridCell>> = rows
+        .iter()
+        .map(|row| {
+            let y0 = row.y;
+            let y1 = row.y + row.size.max(1e-3);
+            let mut cells: Vec<GridCell> = slots
+                .iter()
+                .enumerate()
+                .map(|(col, &(lo, hi))| GridCell {
+                    text: String::new(),
+                    bbox: [lo, y0, hi.max(lo + 1e-3), y1],
+                    col,
+                    colspan: 1,
+                    rowspan: 1,
+                })
+                .collect();
+            for cell in &row.cells {
+                let (col, span) = place_cell(cell.x0, cell.x1, &slots);
+                let gc = &mut cells[col];
+                if gc.text.is_empty() {
+                    gc.text = cell.text.clone();
+                    let cx0 = cell.x0.min(cell.x1);
+                    gc.bbox = [cx0, y0, cell.x1.max(cx0 + 1e-3), y1];
+                    gc.colspan = span;
+                } else {
+                    // Two cells in one slot: keep both rather than drop content.
+                    gc.text.push(' ');
+                    gc.text.push_str(&cell.text);
+                    gc.bbox[2] = gc.bbox[2].max(cell.x1);
+                    gc.colspan = gc.colspan.max(span);
+                }
+            }
+            cells
+        })
+        .collect();
+
+    Some(Table {
+        columns,
+        header_rows: 1,
+        rows: grid_rows,
+    })
+}
+
+/// Cluster cell left edges across rows into column-left positions. A cluster
+/// must be shared by >= 2 rows to count (so a lone stray cell doesn't invent a
+/// column); the representative is the cluster's smallest (leftmost) x.
+fn column_lefts(rows: &[RowCells]) -> Vec<f32> {
+    let mut xs: Vec<(f32, usize)> = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(ri, r)| r.cells.iter().map(move |c| (c.x0, ri)))
+        .filter(|(x, _)| x.is_finite())
+        .collect();
+    xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+    let mut lefts = Vec::new();
+    let mut i = 0;
+    while i < xs.len() {
+        let anchor = xs[i].0;
+        let mut j = i;
+        let mut cluster_rows = Vec::new();
+        while j < xs.len() && xs[j].0 - anchor <= ALIGNMENT_TOL {
+            cluster_rows.push(xs[j].1);
+            j += 1;
+        }
+        if distinct_count(&cluster_rows) >= 2 {
+            lefts.push(anchor);
+        }
+        i = j;
+    }
+    lefts
+}
+
+/// Place a cell into the grid: its column is the *leftmost* slot it overlaps by
+/// at least half the slot's width, and its colspan is how many slots it so
+/// covers. A thin cell that doesn't reach half of any slot falls back to the
+/// slot its center sits in, colspan 1. Always returns a valid column and span >= 1
+/// so a cell can never vanish or land out of range.
+fn place_cell(x0: f32, x1: f32, slots: &[(f32, f32)]) -> (usize, usize) {
+    let mut first: Option<usize> = None;
+    let mut span = 0usize;
+    for (i, &(lo, hi)) in slots.iter().enumerate() {
+        let width = hi - lo;
+        if width > 1e-3 {
+            let overlap = (x1.min(hi) - x0.max(lo)).max(0.0);
+            if overlap >= 0.5 * width {
+                first.get_or_insert(i);
+                span += 1;
+            }
+        }
+    }
+    match first {
+        Some(i) => (i, span.max(1)),
+        None => {
+            let center = (x0 + x1) * 0.5;
+            let col = slots
+                .iter()
+                .position(|&(lo, hi)| center >= lo && center < hi)
+                .unwrap_or(slots.len().saturating_sub(1));
+            (col, 1)
+        }
+    }
 }
 
 /// A short block of the form "Figure/Fig./Table/Exhibit/Chart/Diagram/Plate <n><sep>"
@@ -532,6 +877,7 @@ struct Acc {
     kind: ElementKind,
     heading_path: Vec<String>,
     bbox: [f32; 4],
+    table: Option<Table>,
 }
 
 impl Acc {
@@ -547,6 +893,7 @@ impl Acc {
             heading_path: self.heading_path,
             char_start: 0,
             char_len: 0,
+            table: self.table,
         }
     }
 }
@@ -579,6 +926,7 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                 heading_path: path,
                 char_start: 0,
                 char_len: 0,
+                table: None,
             });
             stack.push((block.size, block.text));
             continue;
@@ -596,7 +944,9 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                 let same = c.page == block.page && c.heading_path == path;
                 // Only merge blocks of the same kind, so tables/captions/lists
                 // stay distinct chunks rather than dissolving into paragraphs.
-                let flush = !same || c.kind != block.kind || over;
+                // Tables never merge with each other either, so a chunk's grid
+                // always matches its text (two stacked tables stay separate).
+                let flush = !same || c.kind != block.kind || over || c.kind == ElementKind::Table;
                 (flush, same, over)
             }
             None => (false, false, false),
@@ -641,6 +991,9 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                     kind: block.kind,
                     heading_path: path,
                     bbox: block.bbox,
+                    // The grid belongs to this (table) block; on a later merge we
+                    // keep this first grid.
+                    table: block.table,
                 });
             }
         }
@@ -654,7 +1007,35 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_aligned_column, is_caption};
+    use super::{csv_field, has_aligned_column, html_escape, is_caption, place_cell};
+
+    #[test]
+    fn place_cell_colspan() {
+        let slots = [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0)];
+        // Fully inside one slot.
+        assert_eq!(place_cell(0.0, 95.0, &slots), (0, 1));
+        // Covers slot 0 fully and >=half of slot 1 -> colspan 2 from the left.
+        assert_eq!(place_cell(0.0, 150.0, &slots), (0, 2));
+        // Overlaps slot 0 by < half -> falls back to center slot, colspan 1.
+        assert_eq!(place_cell(40.0, 60.0, &slots), (0, 1));
+        // A thin cell near a boundary -> center slot, colspan 1.
+        assert_eq!(place_cell(145.0, 155.0, &slots), (1, 1));
+    }
+
+    #[test]
+    fn csv_field_quoting() {
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_field(" x"), "\" x\"");
+        assert_eq!(csv_field("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn html_escape_significant_chars() {
+        assert_eq!(html_escape("<a>&\"'"), "&lt;a&gt;&amp;&quot;&#39;");
+        assert_eq!(html_escape("plain"), "plain");
+    }
 
     #[test]
     fn aligned_columns_are_a_table() {

@@ -315,6 +315,43 @@ pub fn type0_identity() -> Vec<u8> {
     to_bytes(doc)
 }
 
+/// Two separate 2x2 text tables stacked with a large vertical gap (so they form
+/// distinct blocks), for verifying that stacked tables stay separate chunks.
+pub fn two_tables() -> Vec<u8> {
+    // (text, x, y): two columns at x=72/250; table 1 at y=700/680, table 2 at
+    // y=600/580 (the 80pt gap exceeds the block-merge threshold).
+    let cells: &[(&str, i64, i64)] = &[
+        ("A1", 72, 700),
+        ("B1", 250, 700),
+        ("A2", 72, 680),
+        ("B2", 250, 680),
+        ("C1", 72, 600),
+        ("D1", 250, 600),
+        ("C2", 72, 580),
+        ("D2", 250, 580),
+    ];
+    let mut ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 11_i64.into()]),
+    ];
+    for (text, x, y) in cells {
+        ops.push(Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                (*x as f32).into(),
+                (*y as f32).into(),
+            ],
+        ));
+        ops.push(Operation::new("Tj", vec![Object::string_literal(*text)]));
+    }
+    ops.push(Operation::new("ET", vec![]));
+    to_bytes(assemble("Two Tables Fixture", "pdfkit", ops, vec![]))
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {
