@@ -572,6 +572,12 @@ impl Page<'_> {
     pub fn image_regions(&self) -> Vec<crate::figures::ImageRegion> {
         crate::figures::image_regions(&self.doc.inner, self.id)
     }
+
+    /// Axis-aligned stroked ruled lines (table borders) on this page, in points.
+    /// A low-level primitive for reconstructing bordered-table structure.
+    pub fn ruled_lines(&self) -> Vec<crate::RuledLine> {
+        crate::ruled_lines::page_ruled_lines(&self.doc.inner, self.id)
+    }
 }
 
 #[cfg(feature = "render-native")]
