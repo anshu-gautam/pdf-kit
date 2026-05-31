@@ -708,6 +708,154 @@ pub fn figure_with_caption() -> Vec<u8> {
     to_bytes(assemble("Figure Fixture", "pdfkit", ops, images))
 }
 
+/// A minimal tagged document whose structure tree contains a `Table` of
+/// `TR`/`TH`/`TD` cells: a header row (`Name`, `Role`), a data row (`Ada`,
+/// `Eng`), and a final row with one cell spanning both columns (`/A /ColSpan 2`,
+/// text `Note`). Each cell references a positioned MCID. For tagged-table grid
+/// reconstruction.
+pub fn tagged_table() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    let struct_root_id = doc.new_object_id();
+    let table_id = doc.new_object_id();
+    let tr0 = doc.new_object_id();
+    let tr1 = doc.new_object_id();
+    let tr2 = doc.new_object_id();
+    let c_name = doc.new_object_id();
+    let c_role = doc.new_object_id();
+    let c_ada = doc.new_object_id();
+    let c_eng = doc.new_object_id();
+    let c_note = doc.new_object_id();
+
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+
+    let marked = |ops: &mut Vec<Operation>, tag: &str, mcid: i64, text: &str, x: f32, y: f32| {
+        ops.push(Operation::new(
+            "BDC",
+            vec![
+                Object::Name(tag.as_bytes().to_vec()),
+                Object::Dictionary(dictionary! { "MCID" => mcid }),
+            ],
+        ));
+        ops.push(Operation::new(
+            "Tm",
+            vec![
+                1.0f32.into(),
+                0.0f32.into(),
+                0.0f32.into(),
+                1.0f32.into(),
+                x.into(),
+                y.into(),
+            ],
+        ));
+        ops.push(Operation::new("Tj", vec![Object::string_literal(text)]));
+        ops.push(Operation::new("EMC", vec![]));
+    };
+    let mut ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 11_i64.into()]),
+    ];
+    marked(&mut ops, "TH", 0, "Name", 72.0, 700.0);
+    marked(&mut ops, "TH", 1, "Role", 250.0, 700.0);
+    marked(&mut ops, "TD", 2, "Ada", 72.0, 680.0);
+    marked(&mut ops, "TD", 3, "Eng", 250.0, 680.0);
+    marked(&mut ops, "TD", 4, "Note", 72.0, 660.0);
+    ops.push(Operation::new("ET", vec![]));
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        Content { operations: ops }
+            .encode()
+            .expect("encode content stream"),
+    ));
+
+    doc.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()],
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "StructParents" => 0_i64,
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1_i64,
+        }),
+    );
+
+    let cell = |s: &str, parent: lopdf::ObjectId, mcid: i64| {
+        dictionary! {
+            "Type" => "StructElem", "S" => s, "P" => parent, "Pg" => page_id, "K" => mcid,
+        }
+    };
+    doc.objects
+        .insert(c_name, Object::Dictionary(cell("TH", tr0, 0)));
+    doc.objects
+        .insert(c_role, Object::Dictionary(cell("TH", tr0, 1)));
+    doc.objects
+        .insert(c_ada, Object::Dictionary(cell("TD", tr1, 2)));
+    doc.objects
+        .insert(c_eng, Object::Dictionary(cell("TD", tr1, 3)));
+    let mut note = cell("TD", tr2, 4);
+    note.set(
+        "A",
+        Object::Dictionary(dictionary! { "O" => "Table", "ColSpan" => 2_i64 }),
+    );
+    doc.objects.insert(c_note, Object::Dictionary(note));
+
+    let row = |parent: lopdf::ObjectId, kids: Vec<lopdf::ObjectId>| {
+        dictionary! {
+            "Type" => "StructElem", "S" => "TR", "P" => parent,
+            "K" => kids.into_iter().map(Object::Reference).collect::<Vec<_>>(),
+        }
+    };
+    doc.objects
+        .insert(tr0, Object::Dictionary(row(table_id, vec![c_name, c_role])));
+    doc.objects
+        .insert(tr1, Object::Dictionary(row(table_id, vec![c_ada, c_eng])));
+    doc.objects
+        .insert(tr2, Object::Dictionary(row(table_id, vec![c_note])));
+    doc.objects.insert(
+        table_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructElem", "S" => "Table", "P" => struct_root_id,
+            "K" => vec![tr0.into(), tr1.into(), tr2.into()],
+        }),
+    );
+    doc.objects.insert(
+        struct_root_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructTreeRoot", "K" => table_id,
+        }),
+    );
+
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "MarkInfo" => dictionary! { "Marked" => true },
+        "StructTreeRoot" => struct_root_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    let info_id = doc.add_object(dictionary! {
+        "Title" => Object::string_literal("Tagged Table Fixture"),
+        "Author" => Object::string_literal("pdfkit"),
+    });
+    doc.trailer.set("Info", info_id);
+    let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
+    doc.trailer
+        .set("ID", Object::Array(vec![file_id.clone(), file_id]));
+    to_bytes(doc)
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {

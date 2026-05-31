@@ -6,10 +6,11 @@
 //! blocks into token-sized chunks without crossing block boundaries.
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use pdfkit_core::{
     group_runs_into_lines, is_caption, Cell, Document, ImageRegion, Line, PdfError, StructNode,
-    TextRun,
+    TextRun, MAX_SPAN,
 };
 
 /// The kind of a structural element a chunk came from.
@@ -281,13 +282,11 @@ fn walk_struct(node: &StructNode, blocks: &mut Vec<Block>, last_page: &mut usize
             ));
         }
         TagClass::Block(kind) => {
-            blocks.push(struct_block(
-                block_text(node, kind),
-                kind,
-                page,
-                1.0,
-                node.bbox,
-            ));
+            let mut block = struct_block(block_text(node, kind), kind, page, 1.0, node.bbox);
+            if kind == ElementKind::Table {
+                block.table = tagged_table_grid(node);
+            }
+            blocks.push(block);
         }
         TagClass::Grouping => {
             for child in &node.children {
@@ -328,6 +327,134 @@ fn aggregate(node: &StructNode) -> String {
         }
     }
     parts.join("\n")
+}
+
+/// Reconstruct a [`Table`] grid from a tagged `Table` element's `TR`/`TH`/`TD`
+/// structure, honoring `/ColSpan` and `/RowSpan`. Cells are placed with the
+/// standard table layout (a rowspan/colspan cell occupies the slots it covers;
+/// later cells flow past them), the grid is made rectangular with empty fillers,
+/// and leading all-`TH` rows are the header. Returns `None` if there are no rows.
+fn tagged_table_grid(table: &StructNode) -> Option<Table> {
+    let mut rows: Vec<&StructNode> = Vec::new();
+    collect_rows(table, &mut rows);
+    if rows.is_empty() {
+        return None;
+    }
+
+    // Upper bound on columns: a cell can't create more columns than there are
+    // cells in the whole table. Used to clamp a (clamped-but-still-large) span
+    // so the materialized grid stays proportional to the real content.
+    let max_cols: usize = rows
+        .iter()
+        .map(|tr| {
+            tr.children
+                .iter()
+                .filter(|c| c.tag == "TH" || c.tag == "TD")
+                .count()
+        })
+        .sum();
+
+    // Place cells into absolute (row, col) slots, tracking slots already covered
+    // by a span so later cells skip them.
+    let mut occupied: HashSet<(usize, usize)> = HashSet::new();
+    let mut cell_at: HashMap<(usize, usize), GridCell> = HashMap::new();
+    let mut columns = 0usize;
+    let mut header_rows = 0usize;
+    let mut in_header_run = true;
+
+    for (r, tr) in rows.iter().enumerate() {
+        let cells: Vec<&StructNode> = tr
+            .children
+            .iter()
+            .filter(|c| c.tag == "TH" || c.tag == "TD")
+            .collect();
+        // A leading run of all-`TH` rows is the header. An empty row carries no
+        // cells, so it neither counts as a header row nor ends the run.
+        if !cells.is_empty() {
+            if in_header_run && cells.iter().all(|c| c.tag == "TH") {
+                header_rows += 1;
+            } else {
+                in_header_run = false;
+            }
+        }
+
+        let mut c = 0usize;
+        for cell in cells {
+            while occupied.contains(&(r, c)) {
+                c += 1;
+            }
+            // A span can't usefully exceed the table's own bounds (a cell can't
+            // create more columns than there are cells, nor more rows than
+            // exist); clamp to those so a large span can't explode the grid or
+            // the occupied set. MAX_SPAN (clamped at parse time) is the ceiling.
+            let colspan = cell
+                .col_span
+                .clamp(1, MAX_SPAN)
+                .min(max_cols.saturating_sub(c).max(1));
+            let rowspan = cell
+                .row_span
+                .clamp(1, MAX_SPAN)
+                .min(rows.len().saturating_sub(r).max(1));
+            cell_at.insert(
+                (r, c),
+                GridCell {
+                    text: aggregate(cell),
+                    bbox: cell.bbox.unwrap_or([0.0; 4]),
+                    col: c,
+                    colspan,
+                    rowspan,
+                },
+            );
+            for dr in 0..rowspan {
+                for dc in 0..colspan {
+                    if dr > 0 || dc > 0 {
+                        occupied.insert((r + dr, c + dc));
+                    }
+                }
+            }
+            c = c.saturating_add(colspan);
+            columns = columns.max(c);
+        }
+    }
+    if columns == 0 {
+        return None;
+    }
+
+    // Materialize a rectangular grid: real cells at their start slot, empty
+    // fillers (colspan/rowspan-covered or genuinely empty) elsewhere.
+    let grid: Vec<Vec<GridCell>> = (0..rows.len())
+        .map(|r| {
+            (0..columns)
+                .map(|c| {
+                    cell_at.get(&(r, c)).cloned().unwrap_or(GridCell {
+                        text: String::new(),
+                        bbox: [0.0; 4],
+                        col: c,
+                        colspan: 1,
+                        rowspan: 1,
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
+    Some(Table {
+        columns,
+        header_rows,
+        rows: grid,
+    })
+}
+
+/// Collect a tagged table's row (`TR`) elements in reading order, descending
+/// through grouping wrappers (`THead`/`TBody`/`TFoot`) but not into a row.
+fn collect_rows<'a>(node: &'a StructNode, out: &mut Vec<&'a StructNode>) {
+    for child in &node.children {
+        if child.tag == "TR" {
+            out.push(child);
+        } else {
+            collect_rows(child, out);
+        }
+    }
 }
 
 /// A block from the tagged path. `bbox` is the element's measured box from its
@@ -574,23 +701,80 @@ impl Table {
     /// HTML-escaped.
     pub fn to_html(&self) -> String {
         let header_rows = self.header_rows.min(self.rows.len());
+        // Remaining rowspan coverage per column, threaded across all rows so a
+        // slot covered by a cell above is not re-emitted in the lower row.
+        let mut active = vec![0usize; self.columns];
         let mut out = String::from("<table>");
         if header_rows > 0 {
             out.push_str("<thead>");
             for row in &self.rows[..header_rows] {
-                out.push_str(&row_html(row, "th"));
+                out.push_str(&self.row_html(row, "th", &mut active));
             }
             out.push_str("</thead>");
         }
         if self.rows.len() > header_rows {
             out.push_str("<tbody>");
             for row in &self.rows[header_rows..] {
-                out.push_str(&row_html(row, "td"));
+                out.push_str(&self.row_html(row, "td", &mut active));
             }
             out.push_str("</tbody>");
         }
         out.push_str("</table>");
         out
+    }
+
+    /// One HTML table row. Emits each cell with its `colspan`/`rowspan` (when
+    /// those exceed 1); skips empty filler slots covered by a preceding `colspan`
+    /// in this row or by a `rowspan` from a row above (`active` tracks the
+    /// latter). A covered slot that nonetheless carries text is still emitted so
+    /// no content is dropped.
+    fn row_html(&self, row: &[GridCell], tag: &str, active: &mut [usize]) -> String {
+        let mut s = String::from("<tr>");
+        let mut covered_until = 0usize;
+        for col in 0..self.columns {
+            // Covered by a rowspan from a previous row: consume one and skip.
+            if active.get(col).is_some_and(|&a| a > 0) {
+                active[col] -= 1;
+                continue;
+            }
+            let Some(cell) = row.get(col) else { continue };
+            // Empty filler covered by a preceding colspan in this row.
+            if col < covered_until && cell.text.is_empty() {
+                continue;
+            }
+            let colspan = if col >= covered_until {
+                cell.colspan.max(1)
+            } else {
+                1 // covered-but-non-empty: emit standalone so no text is lost
+            };
+            let rowspan = cell.rowspan.max(1);
+            s.push('<');
+            s.push_str(tag);
+            if colspan > 1 {
+                s.push_str(&format!(" colspan=\"{colspan}\""));
+            }
+            if rowspan > 1 {
+                s.push_str(&format!(" rowspan=\"{rowspan}\""));
+            }
+            s.push('>');
+            s.push_str(&html_escape(&cell.text));
+            s.push_str("</");
+            s.push_str(tag);
+            s.push('>');
+            if col >= covered_until {
+                covered_until = col + colspan;
+            }
+            // Mark the columns this cell spans as covered for the next rowspan-1
+            // rows below it.
+            if rowspan > 1 {
+                let end = (col + colspan).min(self.columns);
+                for slot in &mut active[col..end] {
+                    *slot = rowspan - 1;
+                }
+            }
+        }
+        s.push_str("</tr>");
+        s
     }
 
     /// Render as RFC 4180 CSV (one record per row, `columns` fields each). Spans
@@ -612,44 +796,6 @@ impl Table {
         }
         out
     }
-}
-
-/// One HTML table row. A lead cell is emitted with its `colspan`; the empty
-/// filler slots it covers are skipped (keeping the column count consistent).
-/// A covered slot that nonetheless carries text (a collision on a malformed
-/// table) is still emitted as its own cell rather than silently dropped.
-fn row_html(row: &[GridCell], tag: &str) -> String {
-    let mut s = String::from("<tr>");
-    let mut covered_until = 0usize;
-    for (col, cell) in row.iter().enumerate() {
-        // Skip only an *empty* slot already covered by a preceding colspan.
-        if col < covered_until && cell.text.is_empty() {
-            continue;
-        }
-        let span = if col >= covered_until {
-            cell.colspan.max(1)
-        } else {
-            1 // covered-but-non-empty: emit standalone so no text is lost
-        };
-        s.push('<');
-        s.push_str(tag);
-        if span > 1 {
-            s.push_str(&format!(" colspan=\"{span}\""));
-        }
-        if cell.rowspan > 1 {
-            s.push_str(&format!(" rowspan=\"{}\"", cell.rowspan));
-        }
-        s.push('>');
-        s.push_str(&html_escape(&cell.text));
-        s.push_str("</");
-        s.push_str(tag);
-        s.push('>');
-        if col >= covered_until {
-            covered_until = col + span;
-        }
-    }
-    s.push_str("</tr>");
-    s
 }
 
 /// HTML-escape the five significant characters.
@@ -1301,6 +1447,8 @@ mod tests {
             alt: None,
             page: Some(1),
             bbox: None,
+            col_span: 1,
+            row_span: 1,
             children: Vec::new(),
         };
         let row = StructNode {
@@ -1310,6 +1458,8 @@ mod tests {
             alt: None,
             page: Some(1),
             bbox: None,
+            col_span: 1,
+            row_span: 1,
             children: vec![cell("A"), cell("B")],
         };
         let table = StructNode {
@@ -1319,6 +1469,8 @@ mod tests {
             alt: None,
             page: Some(1),
             bbox: None,
+            col_span: 1,
+            row_span: 1,
             children: vec![row],
         };
         // Container's own text is empty; descendants collected in tree order.
@@ -1331,8 +1483,40 @@ mod tests {
             alt: None,
             page: None,
             bbox: None,
+            col_span: 1,
+            row_span: 1,
             children: Vec::new(),
         };
         assert_eq!(aggregate(&empty), "");
+    }
+
+    #[test]
+    fn tagged_table_grid_clamps_pathological_spans() {
+        use super::tagged_table_grid;
+        use pdfkit_core::StructNode;
+        let node = |tag: &str, col_span: usize, children: Vec<StructNode>| StructNode {
+            tag: tag.into(),
+            raw_tag: tag.into(),
+            text: if children.is_empty() {
+                "x".into()
+            } else {
+                String::new()
+            },
+            alt: None,
+            page: Some(1),
+            bbox: None,
+            col_span,
+            row_span: 1,
+            children,
+        };
+        // A single cell claiming a galactic colspan must NOT allocate a galactic
+        // grid: columns are bounded by the table's real cell count (here 1).
+        let cell = node("TD", usize::MAX, Vec::new());
+        let row = node("TR", 1, vec![cell]);
+        let table = node("Table", 1, vec![row]);
+        let grid = tagged_table_grid(&table).expect("grid");
+        assert_eq!(grid.columns, 1, "span clamped to the table's bounds");
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(grid.rows[0][0].text, "x");
     }
 }

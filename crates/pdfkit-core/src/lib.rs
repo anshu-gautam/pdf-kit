@@ -30,7 +30,7 @@ pub use figures::ImageRegion;
 pub use layout::{group_runs_into_lines, is_caption, Cell, Line, COLUMN_GAP};
 pub use ocr::{ocr_page, OcrProvider, OcrResult, OcrWord};
 pub use render::{Background, Bitmap, RenderOptions, Renderer};
-pub use tagged::StructNode;
+pub use tagged::{StructNode, MAX_SPAN};
 pub use textrun::TextRun;
 pub use types::{OpenOptions, PdfInput, TextOptions};
 
