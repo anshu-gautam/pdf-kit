@@ -692,6 +692,22 @@ pub fn tagged_minimal() -> Vec<u8> {
     to_bytes(doc)
 }
 
+/// A page with one embedded image painted into `[100,400]..[500,700]` and a
+/// "Figure 1: …" caption line just below it. For figure-region + caption tests.
+pub fn figure_with_caption() -> Vec<u8> {
+    let mut ops = image_ops("Im0", 400, 300, 100, 400); // bbox [100,400,500,700]
+    ops.push(Operation::new("BT", vec![]));
+    ops.push(Operation::new("Tf", vec!["F1".into(), 14_i64.into()]));
+    ops.push(Operation::new("Td", vec![100_i64.into(), 385_i64.into()]));
+    ops.push(Operation::new(
+        "Tj",
+        vec![Object::string_literal("Figure 1: A sample chart.")],
+    ));
+    ops.push(Operation::new("ET", vec![]));
+    let images = vec![("Im0", gray_image(4, 4))];
+    to_bytes(assemble("Figure Fixture", "pdfkit", ops, images))
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {

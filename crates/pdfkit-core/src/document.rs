@@ -564,6 +564,13 @@ impl Page<'_> {
     pub fn links(&self) -> Vec<Link> {
         self.doc.page_links(self.id)
     }
+
+    /// Image / figure regions painted on this page: each image XObject's bounding
+    /// box (in points) plus its nearest caption line, if any. Render the page and
+    /// [`crate::Bitmap::crop_region`] a bbox to extract that figure as an image.
+    pub fn image_regions(&self) -> Vec<crate::figures::ImageRegion> {
+        crate::figures::image_regions(&self.doc.inner, self.id)
+    }
 }
 
 #[cfg(feature = "render-native")]
