@@ -19,6 +19,9 @@ render-pdfium = ["pdfkit-render/render-pdfium"]
 [dependencies]
 pdfkit-core = { path = "../pdfkit-core" }
 pdfkit-render = { path = "../pdfkit-render" }
+# serde forced on so `chunk --format json` (to_json) is available even when the
+# workspace is built with --no-default-features.
+pdfkit-chunk = { path = "../pdfkit-chunk", features = ["serde"] }
 clap = { workspace = true }
 serde_json = "1"
 

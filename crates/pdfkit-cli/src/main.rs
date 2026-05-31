@@ -3,6 +3,7 @@
 //! - `pdfkit <file>`: extract text (default).
 //! - `pdfkit <file> --json`: extract result as JSON.
 //! - `pdfkit render <file> --page N [-o out.png]`: render a page to PNG.
+//! - `pdfkit chunk <file> --format json|md|text`: structured RAG chunks.
 //! - `--password` / `--password-file`, `-` for stdin, and sensible exit codes.
 
 use std::fmt;
@@ -11,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use pdfkit_chunk::{chunk_document, document_text, to_markdown, ChunkOptions};
 use pdfkit_core::{
     encode_png, extract, Engine, ExtractOptions, Mode, NativeRenderer, OpenOptions, PdfError,
     PdfInput, RenderOptions, Renderer,
@@ -58,6 +60,50 @@ struct Cli {
 enum Command {
     /// Render a single page to a PNG.
     Render(RenderArgs),
+    /// Emit structured RAG chunks as JSON, Markdown, or plain reading-order text.
+    Chunk(ChunkArgs),
+}
+
+/// Output format for `chunk`.
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum ChunkFormat {
+    /// Lossless JSON array of chunks (id, text, page, bbox, kind, heading_path,
+    /// char span, token estimate).
+    Json,
+    /// Human-readable GitHub-flavored Markdown.
+    Md,
+    /// Plain reading-order text (the chunks joined; char spans index into it).
+    Text,
+}
+
+#[derive(Parser, Debug)]
+struct ChunkArgs {
+    /// PDF file to chunk (or `-` for stdin).
+    file: String,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ChunkFormat::Json)]
+    format: ChunkFormat,
+
+    /// Target chunk size in tokens.
+    #[arg(long, default_value_t = 512)]
+    target_tokens: usize,
+
+    /// Token overlap carried across a budget split (0 = none).
+    #[arg(long, default_value_t = 0)]
+    overlap_tokens: usize,
+
+    /// Add a situating context prefix (title + heading path + page) to each chunk.
+    #[arg(long)]
+    context: bool,
+
+    /// Password for an encrypted document.
+    #[arg(long)]
+    password: Option<String>,
+
+    /// Read the password from a file.
+    #[arg(long, value_name = "PATH")]
+    password_file: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -144,8 +190,10 @@ fn main() {
 }
 
 fn run(mut cli: Cli) -> Result<(), CliError> {
-    if let Some(Command::Render(args)) = cli.command.take() {
-        return run_render(args);
+    match cli.command.take() {
+        Some(Command::Render(args)) => return run_render(args),
+        Some(Command::Chunk(args)) => return run_chunk(args),
+        None => {}
     }
     let file = cli
         .file
@@ -222,6 +270,31 @@ fn run_extract(file: &str, cli: &Cli) -> Result<(), CliError> {
     } else {
         writeln!(out, "{}", result.text)?;
     }
+    Ok(())
+}
+
+fn run_chunk(args: ChunkArgs) -> Result<(), CliError> {
+    let input = read_input(&args.file)?;
+    let password = resolve_password(&args.password, &args.password_file)?;
+    let doc = Engine::new()?.open(input, OpenOptions { password })?;
+
+    let opts = ChunkOptions {
+        target_tokens: args.target_tokens,
+        overlap_tokens: args.overlap_tokens,
+        contextual_prefix: args.context,
+        ..ChunkOptions::default()
+    };
+    let chunks = chunk_document(&doc, &opts)?;
+
+    let rendered = match args.format {
+        ChunkFormat::Json => pdfkit_chunk::to_json(&chunks)?,
+        ChunkFormat::Md => to_markdown(&chunks),
+        ChunkFormat::Text => document_text(&chunks),
+    };
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "{rendered}")?;
     Ok(())
 }
 
