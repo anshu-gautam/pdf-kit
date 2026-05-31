@@ -34,12 +34,20 @@ pub struct StructNode {
     /// Bounding box `[x0, y0, x1, y1]` in points — the union of this element's
     /// marked-content and its descendants', when any of it is positioned.
     pub bbox: Option<[f32; 4]>,
+    /// Column span for a table cell (`/A` `/ColSpan`, default 1); 1 elsewhere.
+    pub col_span: usize,
+    /// Row span for a table cell (`/A` `/RowSpan`, default 1); 1 elsewhere.
+    pub row_span: usize,
     /// Child structure elements, in reading order.
     pub children: Vec<StructNode>,
 }
 
 const MAX_DEPTH: usize = 64;
 const MAX_ROLE_DEPTH: usize = 16;
+/// Upper bound on a table cell's `/ColSpan` / `/RowSpan`. No real table spans
+/// more than this; clamping stops a malicious span from exploding the grid a
+/// consumer materializes.
+pub const MAX_SPAN: usize = 1000;
 
 /// Build the structure tree for a tagged document, or `None` if it isn't tagged
 /// (`/MarkInfo` `/Marked true` + a `/StructTreeRoot`). `page_ids` maps page
@@ -78,6 +86,8 @@ pub(crate) fn structure_tree(doc: &LoDoc, page_ids: &[ObjectId]) -> Option<Struc
         alt: None,
         page: None,
         bbox: None,
+        col_span: 1,
+        row_span: 1,
         children,
     })
 }
@@ -183,6 +193,8 @@ impl Ctx<'_> {
             .iter()
             .fold(own_bbox, |acc, c| union_opt(acc, c.bbox));
 
+        let (col_span, row_span) = self.table_spans(elem);
+
         StructNode {
             tag,
             raw_tag,
@@ -190,7 +202,50 @@ impl Ctx<'_> {
             alt,
             page: page_id.and_then(|id| self.page_number_of(id)),
             bbox,
+            col_span,
+            row_span,
             children,
+        }
+    }
+
+    /// Table-cell `/ColSpan` and `/RowSpan` (default 1 each) from the element's
+    /// `/A` attributes. `/A` is a single attribute dict or an array of dicts
+    /// (each optionally followed by a revision number); the spans live in the
+    /// dict(s) owned by `/O /Table`. Spans are clamped to [`MAX_SPAN`] so a
+    /// malicious value can't blow up a grid the consumer builds from them.
+    fn table_spans(&self, elem: &Dictionary) -> (usize, usize) {
+        let (mut col, mut row) = (1usize, 1usize);
+        let Ok(a) = elem.get(b"A") else {
+            return (col, row);
+        };
+        let dicts: Vec<&Dictionary> = match self.deref(a) {
+            Object::Array(items) => items
+                .iter()
+                .filter_map(|o| self.deref(o).as_dict().ok())
+                .collect(),
+            other => other.as_dict().ok().into_iter().collect(),
+        };
+        let span = |d: &Dictionary, key: &[u8]| -> Option<usize> {
+            usize::try_from(d.get(key).ok()?.as_i64().ok()?)
+                .ok()
+                .map(|v| v.clamp(1, MAX_SPAN))
+        };
+        for d in dicts {
+            if let Some(c) = span(d, b"ColSpan") {
+                col = c;
+            }
+            if let Some(r) = span(d, b"RowSpan") {
+                row = r;
+            }
+        }
+        (col, row)
+    }
+
+    /// Follow a single indirect reference, if `o` is one.
+    fn deref<'a>(&'a self, o: &'a Object) -> &'a Object {
+        match o.as_reference() {
+            Ok(id) => self.doc.get_object(id).unwrap_or(o),
+            Err(_) => o,
         }
     }
 

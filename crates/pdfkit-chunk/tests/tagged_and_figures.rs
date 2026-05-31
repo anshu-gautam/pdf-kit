@@ -84,3 +84,50 @@ fn untagged_text_only_docs_are_unchanged_no_figures() {
     assert!(chunks.iter().all(|c| c.kind != ElementKind::Figure));
     assert!(chunks.iter().any(|c| c.kind == ElementKind::Heading));
 }
+
+#[test]
+fn tagged_table_reconstructs_a_grid_with_spans() {
+    let chunks = chunks_of(pdfkit_fixtures::tagged_table());
+    let table = chunks
+        .iter()
+        .find(|c| c.kind == ElementKind::Table)
+        .and_then(|c| c.table.as_ref())
+        .expect("a Table chunk with a grid");
+
+    assert_eq!(table.columns, 2);
+    assert_eq!(table.header_rows, 1, "the all-TH first row is the header");
+    assert_eq!(table.rows.len(), 3);
+
+    // Header + data cells in order, from the TR/TH/TD structure.
+    assert_eq!(table.rows[0][0].text, "Name");
+    assert_eq!(table.rows[0][1].text, "Role");
+    assert_eq!(table.rows[1][0].text, "Ada");
+    assert_eq!(table.rows[1][1].text, "Eng");
+
+    // The final row's cell spans both columns (/A /ColSpan 2).
+    assert_eq!(table.rows[2][0].text, "Note");
+    assert_eq!(table.rows[2][0].colspan, 2);
+    assert!(
+        table.rows[2][1].text.is_empty(),
+        "colspan-covered slot is filler"
+    );
+
+    // Each real cell carries a measured bbox from its MCID.
+    for cell in [&table.rows[0][0], &table.rows[1][1]] {
+        assert!(cell.bbox[0] < cell.bbox[2] && cell.bbox[1] < cell.bbox[3]);
+    }
+
+    // Serializations reflect the grid + span.
+    let html = table.to_html();
+    assert!(
+        html.contains("<thead><tr><th>Name</th><th>Role</th></tr></thead>"),
+        "{html}"
+    );
+    assert!(html.contains("<td colspan=\"2\">Note</td>"), "{html}");
+    let csv = table.to_csv();
+    assert!(csv.contains("Name,Role"));
+    assert!(
+        csv.lines().any(|l| l == "Note,"),
+        "spanned cols blank in csv: {csv}"
+    );
+}
