@@ -19,8 +19,20 @@ fn main() -> std::io::Result<()> {
         ("mixed.pdf", pdfkit_fixtures::mixed()),
         ("multi-heading.pdf", pdfkit_fixtures::multi_heading()),
         ("table.pdf", pdfkit_fixtures::table_doc()),
+        ("two-tables.pdf", pdfkit_fixtures::two_tables()),
         ("forms.pdf", pdfkit_fixtures::forms()),
         ("encrypted.pdf", pdfkit_fixtures::encrypted_default()),
+        (
+            "outline-and-links.pdf",
+            pdfkit_fixtures::outline_and_links(),
+        ),
+        ("cyclic-outline.pdf", pdfkit_fixtures::cyclic_outline()),
+        ("tagged-minimal.pdf", pdfkit_fixtures::tagged_minimal()),
+        ("type0-identity.pdf", pdfkit_fixtures::type0_identity()),
+        (
+            "figure-with-caption.pdf",
+            pdfkit_fixtures::figure_with_caption(),
+        ),
     ];
 
     for (name, bytes) in outputs {
