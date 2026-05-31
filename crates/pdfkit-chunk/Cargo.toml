@@ -7,8 +7,17 @@ rust-version.workspace = true
 repository.workspace = true
 description = "pdfkit chunking: structured/RAG chunks with page, bbox, kind, and heading path."
 
+[features]
+# serde Serialize/Deserialize derives + a to_json convenience. Default-on
+# (serde is pure-Rust); the minimal --no-default-features build drops it.
+default = ["serde"]
+serde = ["dep:serde", "dep:serde_json"]
+
 [dependencies]
 pdfkit-core = { path = "../pdfkit-core", default-features = false }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 pdfkit-fixtures = { path = "../pdfkit-fixtures" }
+serde_json = { workspace = true }

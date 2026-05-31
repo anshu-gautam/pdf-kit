@@ -11,6 +11,7 @@ use pdfkit_core::{group_runs_into_lines, Document, Line, PdfError, TextRun};
 
 /// The kind of a structural element a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ElementKind {
     /// A heading / section title.
     Heading,
@@ -26,17 +27,33 @@ pub enum ElementKind {
 
 /// A structured chunk of a document.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Chunk {
-    /// The chunk text.
+    /// Stable content id (a hash of page + kind + text). Identical chunks across
+    /// runs get the same id; useful for citation references and dedup.
+    pub id: String,
+    /// The chunk text (the extracted source content, without any context prefix).
     pub text: String,
+    /// Optional situating context for embedding/retrieval (document title +
+    /// heading breadcrumb + page), populated when
+    /// [`ChunkOptions::contextual_prefix`] is set. Kept separate from `text` so
+    /// the provenance offsets stay exact.
+    pub context: Option<String>,
     /// One-based page number.
     pub page: usize,
-    /// Bounding box `[x0, y0, x1, y1]` in points, if known.
+    /// Bounding box `[x0, y0, x1, y1]` in points, if known — the visual
+    /// provenance: where on the page this chunk's content sits.
     pub bbox: Option<[f32; 4]>,
     /// The element kind.
     pub kind: ElementKind,
     /// Breadcrumb of enclosing headings (outermost first).
     pub heading_path: Vec<String>,
+    /// Char offset of this chunk's `text` within [`document_text`] (the chunks
+    /// joined in reading order). With `char_len`, an exact span back into the
+    /// reconstructed document text for highlighting / lineage.
+    pub char_start: usize,
+    /// Char length of `text` (== `text.chars().count()`).
+    pub char_len: usize,
     /// Approximate token count.
     pub token_estimate: usize,
 }
@@ -52,6 +69,10 @@ pub struct ChunkOptions {
     pub overlap_tokens: usize,
     /// Never split a block across chunks.
     pub respect_boundaries: bool,
+    /// When set, populate [`Chunk::context`] with a deterministic situating
+    /// prefix (document title + heading breadcrumb + page) for retrieval. The
+    /// chunk `text` itself is left unchanged.
+    pub contextual_prefix: bool,
 }
 
 impl Default for ChunkOptions {
@@ -60,6 +81,7 @@ impl Default for ChunkOptions {
             target_tokens: 512,
             overlap_tokens: 0,
             respect_boundaries: true,
+            contextual_prefix: false,
         }
     }
 }
@@ -85,7 +107,190 @@ pub fn chunk_document(doc: &Document, opts: &ChunkOptions) -> Result<Vec<Chunk>,
         blocks.extend(group_blocks(lines, body, page));
     }
 
-    Ok(pack(blocks, opts))
+    let mut chunks = pack(blocks, opts);
+    finalize_provenance(&mut chunks, doc.metadata().title.as_deref(), opts);
+    Ok(chunks)
+}
+
+/// Fill in the cross-chunk fields once the chunk sequence is final: the exact
+/// char span into [`document_text`], a stable id, and (opt-in) the context
+/// prefix. Done as a single post-pass so packing stays simple.
+fn finalize_provenance(chunks: &mut [Chunk], title: Option<&str>, opts: &ChunkOptions) {
+    let mut offset = 0usize;
+    for chunk in chunks.iter_mut() {
+        chunk.char_len = chunk.text.chars().count();
+        chunk.char_start = offset;
+        // `document_text` joins chunks with a blank line ("\n\n").
+        offset += chunk.char_len + DOCUMENT_TEXT_SEPARATOR.chars().count();
+        chunk.id = stable_id(chunk);
+        if opts.contextual_prefix {
+            chunk.context = Some(context_prefix(title, &chunk.heading_path, chunk.page));
+        }
+    }
+}
+
+/// Separator between chunks in [`document_text`]; `char_start`/`char_len` are
+/// computed against a join using exactly this.
+const DOCUMENT_TEXT_SEPARATOR: &str = "\n\n";
+
+/// The chunks joined in reading order into one document text. Each chunk's
+/// `char_start..char_start + char_len` (counted in chars) slices out exactly
+/// that chunk's `text`.
+pub fn document_text(chunks: &[Chunk]) -> String {
+    let mut out = String::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        if i > 0 {
+            out.push_str(DOCUMENT_TEXT_SEPARATOR);
+        }
+        out.push_str(&chunk.text);
+    }
+    out
+}
+
+/// A stable, deterministic content id (FNV-1a 64, hex) over page + kind + text,
+/// so the same content yields the same id across runs without a hashing dep.
+fn stable_id(chunk: &Chunk) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    feed(&(chunk.page as u64).to_le_bytes());
+    feed(kind_tag(chunk.kind).as_bytes());
+    feed(b"\0");
+    feed(chunk.text.as_bytes());
+    format!("{hash:016x}")
+}
+
+/// Stable lowercase tag for a kind (used in ids and Markdown).
+fn kind_tag(kind: ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Heading => "heading",
+        ElementKind::Paragraph => "paragraph",
+        ElementKind::List => "list",
+        ElementKind::Table => "table",
+        ElementKind::Caption => "caption",
+    }
+}
+
+/// Build the deterministic context prefix: `Title > H1 > H2 (p.N)`.
+fn context_prefix(title: Option<&str>, heading_path: &[String], page: usize) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(t) = title {
+        if !t.is_empty() {
+            parts.push(t);
+        }
+    }
+    parts.extend(heading_path.iter().map(String::as_str));
+    let trail = parts.join(" > ");
+    if trail.is_empty() {
+        format!("(p.{page})")
+    } else {
+        format!("{trail} (p.{page})")
+    }
+}
+
+/// Backslash-escape a leading block-level Markdown marker (`#`, `>`, `|`) at the
+/// start of each line, so extracted prose that happens to begin with one isn't
+/// rendered as a heading, blockquote, or table. Conservative: only the first
+/// non-space character of a line is touched.
+fn escape_block_markers(text: &str) -> String {
+    let mut out = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let trimmed = line.trim_start();
+        out.push_str(&line[..line.len() - trimmed.len()]); // preserve indentation
+        if trimmed.starts_with(['#', '>', '|']) {
+            out.push('\\');
+        }
+        out.push_str(trimmed);
+    }
+    out
+}
+
+/// Render chunks to GitHub-flavored Markdown in reading order: headings by
+/// depth, captions italic, tab-separated table rows as a pipe table, list items
+/// verbatim, and prose with leading Markdown markers escaped. Deterministic and
+/// offline; a best-effort human-readable export (the JSON output is lossless).
+pub fn to_markdown(chunks: &[Chunk]) -> String {
+    let mut out = String::new();
+    for chunk in chunks {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        match chunk.kind {
+            ElementKind::Heading => {
+                let level = (chunk.heading_path.len() + 1).min(6);
+                out.push_str(&"#".repeat(level));
+                out.push(' ');
+                out.push_str(&escape_block_markers(chunk.text.trim()));
+            }
+            ElementKind::Caption => {
+                out.push('*');
+                out.push_str(chunk.text.trim());
+                out.push('*');
+            }
+            ElementKind::Table => out.push_str(&table_to_markdown(&chunk.text)),
+            // List text is rendered verbatim so its leading bullet/number
+            // markers survive; prose has its leading markers escaped so extracted
+            // content isn't misread as Markdown structure.
+            ElementKind::List => out.push_str(chunk.text.trim_end()),
+            ElementKind::Paragraph => out.push_str(&escape_block_markers(chunk.text.trim_end())),
+        }
+    }
+    out
+}
+
+/// Render a tab-separated table block (rows = lines, cells = tab-split) as a GFM
+/// pipe table, escaping cell pipes. The first row is the header. Falls back to
+/// the raw text if it isn't actually multi-column.
+fn table_to_markdown(text: &str) -> String {
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .map(|line| line.split('\t').map(str::trim).collect())
+        .collect();
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if cols < 2 {
+        return text.trim_end().to_string();
+    }
+    let render_row = |cells: &[&str]| -> String {
+        let mut s = String::new();
+        for c in 0..cols {
+            let cell = cells.get(c).copied().unwrap_or("").replace('|', "\\|");
+            s.push_str("| ");
+            s.push_str(&cell);
+            s.push(' ');
+        }
+        s.push('|');
+        s
+    };
+    let mut out = String::new();
+    let mut iter = rows.iter();
+    if let Some(header) = iter.next() {
+        out.push_str(&render_row(header));
+        out.push_str("\n|");
+        for _ in 0..cols {
+            out.push_str(" --- |");
+        }
+        for row in iter {
+            out.push('\n');
+            out.push_str(&render_row(row));
+        }
+    }
+    out
+}
+
+/// Serialize chunks to pretty JSON. Requires the `serde` feature.
+#[cfg(feature = "serde")]
+pub fn to_json(chunks: &[Chunk]) -> Result<String, PdfError> {
+    serde_json::to_string_pretty(chunks)
+        .map_err(|e| PdfError::Backend(format!("serialize chunks to json: {e}")))
 }
 
 /// The most common (rounded) font size, treated as body text. Ties break to the
@@ -332,12 +537,16 @@ struct Acc {
 impl Acc {
     fn finish(self) -> Chunk {
         Chunk {
+            id: String::new(),
             token_estimate: estimate_tokens(&self.text),
             text: self.text,
+            context: None,
             page: self.page,
             bbox: Some(self.bbox),
             kind: self.kind,
             heading_path: self.heading_path,
+            char_start: 0,
+            char_len: 0,
         }
     }
 }
@@ -360,12 +569,16 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
             }
             let path: Vec<String> = stack.iter().map(|(_, t)| t.clone()).collect();
             chunks.push(Chunk {
+                id: String::new(),
                 token_estimate: estimate_tokens(&block.text),
                 text: block.text.clone(),
+                context: None,
                 page: block.page,
                 bbox: Some(block.bbox),
                 kind: ElementKind::Heading,
                 heading_path: path,
+                char_start: 0,
+                char_len: 0,
             });
             stack.push((block.size, block.text));
             continue;
