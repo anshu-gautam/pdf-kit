@@ -43,6 +43,64 @@ impl std::fmt::Debug for Bitmap {
     }
 }
 
+impl Bitmap {
+    /// Crop to the pixel rectangle at `(x, y)` of size `w` × `h`, clamped to the
+    /// bitmap bounds. A degenerate rectangle — or a malformed bitmap whose buffer
+    /// doesn't match its dimensions — yields a 0×0 bitmap.
+    pub fn crop(&self, x: u32, y: u32, w: u32, h: u32) -> Bitmap {
+        // Refuse a buffer that doesn't match the declared size rather than risk
+        // an out-of-bounds slice (the fields are public, so a caller can desync
+        // them). u64 math avoids overflow even for huge declared dimensions.
+        if self.rgba.len() as u64 != u64::from(self.width) * u64::from(self.height) * 4 {
+            return Bitmap {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+            };
+        }
+        let x0 = x.min(self.width);
+        let y0 = y.min(self.height);
+        let x1 = x.saturating_add(w).min(self.width);
+        let y1 = y.saturating_add(h).min(self.height);
+        let (cw, ch) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+        // With the invariant above, every offset is <= rgba.len() (a real Vec
+        // length), so usize arithmetic here cannot overflow or go out of bounds.
+        let stride = self.width as usize;
+        let mut rgba = Vec::with_capacity((cw as usize) * (ch as usize) * 4);
+        for row in y0..y1 {
+            let start = (row as usize * stride + x0 as usize) * 4;
+            let end = (row as usize * stride + x1 as usize) * 4;
+            rgba.extend_from_slice(&self.rgba[start..end]);
+        }
+        Bitmap {
+            width: cw,
+            height: ch,
+            rgba,
+        }
+    }
+
+    /// Crop this rendered page to a region given in PDF points (origin
+    /// bottom-left), e.g. an [`crate::ImageRegion`] bbox — converting to pixels
+    /// against the page size and flipping the y axis. Use to extract a figure to
+    /// its own image.
+    pub fn crop_region(&self, page_w_pt: f32, page_h_pt: f32, region: [f32; 4]) -> Bitmap {
+        let sx = self.width as f32 / page_w_pt.max(1.0);
+        let sy = self.height as f32 / page_h_pt.max(1.0);
+        let [rx0, ry0, rx1, ry1] = region;
+        let px0 = (rx0.min(rx1) * sx).floor().max(0.0) as u32;
+        let px1 = (rx0.max(rx1) * sx).ceil().max(0.0) as u32;
+        // Device y is top-down; PDF y is bottom-up.
+        let py_top = (self.height as f32 - ry0.max(ry1) * sy).floor().max(0.0) as u32;
+        let py_bot = (self.height as f32 - ry0.min(ry1) * sy).ceil().max(0.0) as u32;
+        self.crop(
+            px0,
+            py_top,
+            px1.saturating_sub(px0),
+            py_bot.saturating_sub(py_top),
+        )
+    }
+}
+
 /// How to size and paint a rendered page.
 ///
 /// Sizing precedence: explicit `width`/`height` win, else `dpi`, else `scale`,

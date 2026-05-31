@@ -66,6 +66,36 @@ pub struct Line {
 /// so the chunker's table detection and reflow agree on what a column gap is.
 pub const COLUMN_GAP: f32 = 4.0;
 
+/// Whether a line reads as a figure/table caption: a short line of the form
+/// `Figure/Fig./Table/Exhibit/Chart/Diagram/Plate <n><sep>` — e.g. "Figure 1:"
+/// or "Table 2.". The number must be followed by a separator so ordinary prose
+/// like "Table 1 shows the results" is not treated as a caption. Shared by the
+/// chunker (block classification) and figure/caption pairing.
+pub fn is_caption(text: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "figure", "fig", "table", "exhibit", "chart", "diagram", "plate",
+    ];
+    let trimmed = text.trim_start();
+    if trimmed.split_whitespace().count() > 15 {
+        return false;
+    }
+    let mut words = trimmed.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    if !KEYWORDS.contains(&first.trim_end_matches('.').to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    // The label number must end with (or be followed by) a separator: "1:", "1.",
+    // "2)", "3-". Prose ("Table 1 shows ...") has a bare number then a word.
+    match words.next() {
+        Some(second) if second.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            second.ends_with([':', '.', ')', '-', '\u{2013}', '\u{2014}'])
+        }
+        _ => false,
+    }
+}
+
 /// A gap wider than this many times the font size inserts a single space.
 const WORD_GAP: f32 = 0.25;
 

@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 
-use pdfkit_core::{group_runs_into_lines, Cell, Document, Line, PdfError, TextRun};
+use pdfkit_core::{group_runs_into_lines, is_caption, Cell, Document, Line, PdfError, TextRun};
 
 /// The kind of a structural element a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -786,35 +786,6 @@ fn place_cell(x0: f32, x1: f32, slots: &[(f32, f32)]) -> (usize, usize) {
     }
 }
 
-/// A short block of the form "Figure/Fig./Table/Exhibit/Chart/Diagram/Plate <n><sep>"
-/// reads as a caption — e.g. "Figure 1:" / "Table 2." The number must be followed
-/// by a separator so ordinary prose like "Table 1 shows the results" is NOT
-/// treated as a caption.
-fn is_caption(text: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "figure", "fig", "table", "exhibit", "chart", "diagram", "plate",
-    ];
-    let trimmed = text.trim_start();
-    if trimmed.split_whitespace().count() > 15 {
-        return false;
-    }
-    let mut words = trimmed.split_whitespace();
-    let Some(first) = words.next() else {
-        return false;
-    };
-    if !KEYWORDS.contains(&first.trim_end_matches('.').to_ascii_lowercase().as_str()) {
-        return false;
-    }
-    // The label number must end with (or be followed by) a separator: "1:", "1.",
-    // "2)", "3-". Prose ("Table 1 shows ...") has a bare number then a word.
-    match words.next() {
-        Some(second) if second.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
-            second.ends_with([':', '.', ')', '-', '\u{2013}', '\u{2014}'])
-        }
-        _ => false,
-    }
-}
-
 /// Classify a non-heading block by its leading glyphs.
 fn classify_text(text: &str) -> ElementKind {
     let s = text.trim_start();
@@ -1007,7 +978,8 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
 
 #[cfg(test)]
 mod tests {
-    use super::{csv_field, has_aligned_column, html_escape, is_caption, place_cell};
+    use super::{csv_field, has_aligned_column, html_escape, place_cell};
+    use pdfkit_core::is_caption;
 
     #[test]
     fn place_cell_colspan() {
