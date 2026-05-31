@@ -179,16 +179,20 @@ fn geometry_blocks(doc: &Document) -> Result<Vec<Block>, PdfError> {
                 .collect();
             page_blocks
                 .retain(|b| !(b.kind == ElementKind::Caption && adopted.contains(b.text.as_str())));
-            page_blocks.extend(figures.into_iter().map(|r| figure_block(r, page)));
-            // Order the page top-to-bottom (descending top edge) so each figure
-            // sits next to its caption. Only for single-column pages: re-sorting
-            // a multi-column page by top edge alone would interleave columns, so
-            // there we keep the column reading order and leave figures appended.
-            // TODO(design): per-column figure placement.
-            if page_blocks.iter().all(|b| b.column == 0) {
-                page_blocks
-                    .sort_by(|a, b| b.bbox[3].partial_cmp(&a.bbox[3]).unwrap_or(Ordering::Equal));
-            }
+            // Assign each figure the column band of the text it sits within, then
+            // order the page by (column, top edge) so a figure lands in its
+            // column's reading order — correct on multi-column pages, and the
+            // same top-to-bottom order on single-column ones.
+            let bands = column_bands(&page_blocks);
+            page_blocks.extend(figures.into_iter().map(|r| {
+                let column = column_of(&bands, r.bbox);
+                figure_block(r, page, column)
+            }));
+            page_blocks.sort_by(|a, b| {
+                a.column
+                    .cmp(&b.column)
+                    .then(b.bbox[3].partial_cmp(&a.bbox[3]).unwrap_or(Ordering::Equal))
+            });
         }
         blocks.extend(page_blocks);
     }
@@ -196,7 +200,7 @@ fn geometry_blocks(doc: &Document) -> Result<Vec<Block>, PdfError> {
 }
 
 /// A Figure block from a detected image region; its text is the paired caption.
-fn figure_block(region: ImageRegion, page: usize) -> Block {
+fn figure_block(region: ImageRegion, page: usize, column: usize) -> Block {
     let text = match region.caption {
         Some(c) if !c.is_empty() => c,
         _ => "[figure]".to_string(),
@@ -209,13 +213,51 @@ fn figure_block(region: ImageRegion, page: usize) -> Block {
         size: 1.0,
         kind: ElementKind::Figure,
         last_y: region.bbox[1],
-        column: 0,
+        column,
         lines: 1,
         tabular_lines: 0,
         gap_rows: Vec::new(),
         rows: Vec::new(),
         table: None,
     }
+}
+
+/// Per-column horizontal x-ranges `[x0, x1]` of the text blocks, indexed by
+/// column band, so a figure can be assigned to the column it overlaps.
+fn column_bands(blocks: &[Block]) -> Vec<[f32; 2]> {
+    let ncols = blocks.iter().map(|b| b.column + 1).max().unwrap_or(1);
+    let mut bands = vec![[f32::INFINITY, f32::NEG_INFINITY]; ncols];
+    for b in blocks {
+        let band = &mut bands[b.column];
+        band[0] = band[0].min(b.bbox[0]);
+        band[1] = band[1].max(b.bbox[2]);
+    }
+    bands
+}
+
+/// The column band a figure's bbox belongs to: the one whose x-range contains
+/// the figure's center, else the nearest band (column 0 if none are valid).
+fn column_of(bands: &[[f32; 2]], bbox: [f32; 4]) -> usize {
+    let cx = (bbox[0] + bbox[2]) * 0.5;
+    let mut best = 0usize;
+    let mut best_dist = f32::INFINITY;
+    for (i, &[lo, hi]) in bands.iter().enumerate() {
+        if hi < lo {
+            continue; // empty band
+        }
+        let dist = if cx < lo {
+            lo - cx
+        } else if cx > hi {
+            cx - hi
+        } else {
+            0.0
+        };
+        if dist < best_dist {
+            best_dist = dist;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Tagged path: build blocks from the logical structure tree, or `None` when the
@@ -1469,8 +1511,22 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
 
 #[cfg(test)]
 mod tests {
-    use super::{csv_field, has_aligned_column, html_escape, place_cell};
+    use super::{column_of, csv_field, has_aligned_column, html_escape, place_cell};
     use pdfkit_core::is_caption;
+
+    #[test]
+    fn column_of_assigns_a_figure_to_its_band() {
+        // Two text columns: left [50,260], right [300,520].
+        let bands = [[50.0f32, 260.0], [300.0, 520.0]];
+        // A figure centered in the right column -> column 1.
+        assert_eq!(column_of(&bands, [310.0, 400.0, 500.0, 700.0]), 1);
+        // Centered in the left column -> column 0.
+        assert_eq!(column_of(&bands, [60.0, 400.0, 250.0, 700.0]), 0);
+        // Between the columns -> nearest band wins (here the left edge is closer).
+        assert_eq!(column_of(&bands, [270.0, 400.0, 290.0, 700.0]), 0);
+        // No bands -> column 0, no panic.
+        assert_eq!(column_of(&[], [0.0, 0.0, 1.0, 1.0]), 0);
+    }
 
     #[test]
     fn place_cell_colspan() {
