@@ -83,14 +83,16 @@ impl Default for RenderOptions {
 }
 
 /// Default rendering resolution when neither dpi/scale/size is given.
-#[cfg(feature = "render-native")]
 const DEFAULT_DPI: f32 = 150.0;
 
-#[cfg(feature = "render-native")]
 impl RenderOptions {
     /// Compute the integer output `(width, height)` for a page of the given
-    /// size in points, enforcing the pixel budget *before* any allocation.
-    pub(crate) fn output_dimensions(
+    /// size in points, enforcing the pixel/dimension budget *before* any
+    /// allocation.
+    ///
+    /// Backend-independent (no native deps), so the native and PDFIUM renderers
+    /// share one budget enforcement — do not duplicate this logic per backend.
+    pub fn output_dimensions(
         &self,
         page_w_pt: f32,
         page_h_pt: f32,

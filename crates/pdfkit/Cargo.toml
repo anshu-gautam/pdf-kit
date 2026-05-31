@@ -11,11 +11,13 @@ description = "AI-oriented PDF toolkit: read-first extraction, structured chunks
 default = ["render-native", "edit", "chunk", "adapters"]
 # Pure-Rust render path (text types + NativeRenderer + encode_png).
 render-native = ["pdfkit-core/render-native"]
-# High-fidelity PDFIUM render backend.
-render-pdfium = ["dep:pdfkit-render", "pdfkit-render/render-pdfium"]
-# Local ONNX OCR / system Tesseract.
-ocr-ocrs = ["dep:pdfkit-ocr", "pdfkit-ocr/ocr-ocrs"]
-ocr-tesseract = ["dep:pdfkit-ocr", "pdfkit-ocr/ocr-tesseract"]
+# High-fidelity PDFIUM render backend. Pulls in render-native too so encode_png
+# is available to turn the rendered Bitmap into a PNG.
+render-pdfium = ["render-native", "dep:pdfkit-render", "pdfkit-render/render-pdfium"]
+# Local ONNX OCR / system Tesseract. Pull in render-native so extract_with_ocr
+# (and a renderer to rasterize pages for OCR) is available.
+ocr-ocrs = ["render-native", "dep:pdfkit-ocr", "pdfkit-ocr/ocr-ocrs"]
+ocr-tesseract = ["render-native", "dep:pdfkit-ocr", "pdfkit-ocr/ocr-tesseract"]
 # Structured chunking, the write path, and adapters.
 chunk = ["dep:pdfkit-chunk"]
 edit = ["dep:pdfkit-edit"]

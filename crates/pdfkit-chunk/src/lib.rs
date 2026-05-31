@@ -159,7 +159,9 @@ fn group_lines(runs: Vec<TextRun>) -> Vec<Line> {
                 }
                 line.text.push_str(&r.text);
                 line.x0 = line.x0.min(r.bbox[0]);
-                line.x1 = r.bbox[2];
+                // Running max so an out-of-order run can't shrink x1 (which would
+                // inflate the next gap / spuriously trip a column) or make x1<x0.
+                line.x1 = line.x1.max(r.bbox[2]);
                 line.size = line.size.max(size);
             }
             None => lines.push(Line {
@@ -236,19 +238,33 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
     blocks
 }
 
-/// A short block beginning "Figure/Fig./Table/Exhibit/Chart/Diagram [n]" reads as
-/// a caption.
+/// A short block of the form "Figure/Fig./Table/Exhibit/Chart/Diagram/Plate <n><sep>"
+/// reads as a caption — e.g. "Figure 1:" / "Table 2." The number must be followed
+/// by a separator so ordinary prose like "Table 1 shows the results" is NOT
+/// treated as a caption.
 fn is_caption(text: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "figure", "fig", "table", "exhibit", "chart", "diagram", "plate",
+    ];
     let trimmed = text.trim_start();
     if trimmed.split_whitespace().count() > 15 {
         return false;
     }
-    let mut words = trimmed.split([' ', '\t', '.', ':', '\u{00a0}']);
-    let first = words.next().unwrap_or("").to_ascii_lowercase();
-    matches!(
-        first.as_str(),
-        "figure" | "fig" | "table" | "exhibit" | "chart" | "diagram" | "image" | "plate"
-    )
+    let mut words = trimmed.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    if !KEYWORDS.contains(&first.trim_end_matches('.').to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    // The label number must end with (or be followed by) a separator: "1:", "1.",
+    // "2)", "3-". Prose ("Table 1 shows ...") has a bare number then a word.
+    match words.next() {
+        Some(second) if second.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            second.ends_with([':', '.', ')', '-', '\u{2013}', '\u{2014}'])
+        }
+        _ => false,
+    }
 }
 
 /// Classify a non-heading block by its leading glyphs.
@@ -378,8 +394,12 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
         let mut overlap_seed: Option<String> = None;
         if must_flush {
             if let Some(acc) = current.take() {
+                // Carry overlap only on a true within-section budget split: same
+                // page + heading AND same kind. Otherwise (a kind change) we'd
+                // leak e.g. table/caption text into a following paragraph chunk.
+                let same_kind = acc.kind == block.kind;
                 let finished = acc.finish();
-                if opts.overlap_tokens > 0 && continuation && over_budget {
+                if opts.overlap_tokens > 0 && continuation && over_budget && same_kind {
                     overlap_seed = Some(tail_tokens(&finished.text, opts.overlap_tokens));
                 }
                 chunks.push(finished);
@@ -418,4 +438,21 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
         chunks.push(acc.finish());
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_caption;
+
+    #[test]
+    fn caption_vs_prose() {
+        // Real captions: keyword + number + separator.
+        assert!(is_caption("Figure 1: A sample diagram."));
+        assert!(is_caption("Table 2. Results summary"));
+        assert!(is_caption("Fig. 3) Overview of the pipeline"));
+        // Prose that merely starts with a caption word is not a caption.
+        assert!(!is_caption("Table 1 shows the results below."));
+        assert!(!is_caption("The table below lists the fields."));
+        assert!(!is_caption("Figure out the answer before proceeding."));
+    }
 }
