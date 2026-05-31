@@ -352,6 +352,215 @@ pub fn two_tables() -> Vec<u8> {
     to_bytes(assemble("Two Tables Fixture", "pdfkit", ops, vec![]))
 }
 
+/// A two-page PDF with a two-level outline (Chapter 1 > Section 1.1, Chapter 2)
+/// pointing at pages via explicit `/Dest` arrays, plus a page carrying one
+/// external-URI link and one internal-destination link, and a full info dict.
+/// For outline / link / metadata reading.
+pub fn outline_and_links() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page1_id = doc.new_object_id();
+    let page2_id = doc.new_object_id();
+    let link1_id = doc.new_object_id();
+    let link2_id = doc.new_object_id();
+    let outlines_id = doc.new_object_id();
+    let item1_id = doc.new_object_id();
+    let item11_id = doc.new_object_id();
+    let item2_id = doc.new_object_id();
+
+    let media_box = || vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()];
+    let dest = |page: lopdf::ObjectId, x: i64, y: i64| {
+        Object::Array(vec![
+            page.into(),
+            Object::Name(b"XYZ".to_vec()),
+            x.into(),
+            y.into(),
+            Object::Null,
+        ])
+    };
+    let empty_content = doc.add_object(Stream::new(
+        dictionary! {},
+        Content { operations: vec![] }
+            .encode()
+            .expect("encode content stream"),
+    ));
+
+    doc.objects.insert(
+        page1_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => media_box(),
+            "Contents" => empty_content,
+            "Annots" => vec![link1_id.into(), link2_id.into()],
+        }),
+    );
+    doc.objects.insert(
+        page2_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => media_box(),
+            "Contents" => empty_content,
+        }),
+    );
+
+    doc.objects.insert(
+        link1_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Link",
+            "Rect" => vec![50_i64.into(), 700_i64.into(), 150_i64.into(), 720_i64.into()],
+            "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") },
+        }),
+    );
+    doc.objects.insert(
+        link2_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Link",
+            "Rect" => vec![200_i64.into(), 700_i64.into(), 350_i64.into(), 720_i64.into()],
+            "Dest" => dest(page2_id, 50, 100),
+        }),
+    );
+
+    doc.objects.insert(
+        item11_id,
+        Object::Dictionary(dictionary! {
+            "Title" => Object::string_literal("Section 1.1"),
+            "Parent" => item1_id,
+            "Dest" => dest(page2_id, 100, 200),
+        }),
+    );
+    doc.objects.insert(
+        item1_id,
+        Object::Dictionary(dictionary! {
+            "Title" => Object::string_literal("Chapter 1"),
+            "Parent" => outlines_id,
+            "Next" => item2_id,
+            "First" => item11_id,
+            "Last" => item11_id,
+            "Count" => 1_i64,
+            "Dest" => dest(page1_id, 0, 0),
+        }),
+    );
+    doc.objects.insert(
+        item2_id,
+        Object::Dictionary(dictionary! {
+            "Title" => Object::string_literal("Chapter 2"),
+            "Parent" => outlines_id,
+            "Prev" => item1_id,
+            "Dest" => dest(page2_id, 0, 500),
+        }),
+    );
+    doc.objects.insert(
+        outlines_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Outlines",
+            "First" => item1_id,
+            "Last" => item2_id,
+            "Count" => 2_i64,
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page1_id.into(), page2_id.into()],
+            "Count" => 2_i64,
+        }),
+    );
+
+    let info_id = doc.add_object(dictionary! {
+        "Title" => Object::string_literal("Outline and Link Fixture"),
+        "Author" => Object::string_literal("pdfkit"),
+        "Subject" => Object::string_literal("outline + link test"),
+        "Keywords" => Object::string_literal("outlines, links"),
+        "Creator" => Object::string_literal("pdfkit-fixtures"),
+        "Producer" => Object::string_literal("lopdf"),
+    });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "Outlines" => outlines_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    doc.trailer.set("Info", info_id);
+    let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
+    doc.trailer
+        .set("ID", Object::Array(vec![file_id.clone(), file_id]));
+    to_bytes(doc)
+}
+
+/// A malformed single-page PDF whose sole outline item points at itself as both
+/// `/Next` (sibling) and `/First` (child). Used to prove outline traversal
+/// terminates (no hang / stack overflow) on a cyclic outline.
+pub fn cyclic_outline() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    let outlines_id = doc.new_object_id();
+    let item_id = doc.new_object_id();
+    let content = doc.add_object(Stream::new(
+        dictionary! {},
+        Content { operations: vec![] }
+            .encode()
+            .expect("encode content stream"),
+    ));
+    doc.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0_i64.into(), 0_i64.into(), PAGE_W.into(), PAGE_H.into()],
+            "Contents" => content,
+        }),
+    );
+    doc.objects.insert(
+        item_id,
+        Object::Dictionary(dictionary! {
+            "Title" => Object::string_literal("Loop"),
+            "Parent" => outlines_id,
+            "Next" => item_id,  // self-referential sibling
+            "First" => item_id, // self-referential child
+            "Dest" => Object::Array(vec![
+                page_id.into(),
+                Object::Name(b"XYZ".to_vec()),
+                0_i64.into(),
+                0_i64.into(),
+                Object::Null,
+            ]),
+        }),
+    );
+    doc.objects.insert(
+        outlines_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Outlines",
+            "First" => item_id,
+            "Last" => item_id,
+            "Count" => 1_i64,
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+        "Outlines" => outlines_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    let file_id = Object::string_literal(&b"pdfkit-fixture01"[..]);
+    doc.trailer
+        .set("ID", Object::Array(vec![file_id.clone(), file_id]));
+    to_bytes(doc)
+}
+
 /// The born-digital document encrypted (RC4-40, V1) with the well-known
 /// owner/user passwords above.
 pub fn encrypted_default() -> Vec<u8> {
