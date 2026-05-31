@@ -16,6 +16,7 @@ mod figures;
 mod geometry;
 pub mod layout;
 mod ocr;
+mod pdfstr;
 mod render;
 mod tagged;
 mod textrun;
