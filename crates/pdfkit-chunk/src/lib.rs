@@ -74,11 +74,11 @@ pub struct Chunk {
 
 /// A normalized table: a rectangular grid of [`GridCell`]s in reading order.
 ///
-/// Column geometry is inferred from text-gap alignment (no ruled-line parsing
-/// yet), so spans are limited: `colspan` is detected from a cell's horizontal
-/// overlap with the column slots; `rowspan` is always 1 (true row spans need
-/// vector-graphics rules — `TODO(design)`). The first row is treated as the
-/// header.
+/// `colspan`/`rowspan` come from whichever signal is available: a tagged table's
+/// `/ColSpan`//RowSpan` attributes, the ruled grid lines of a bordered table, or
+/// — for a borderless gap-inferred table — horizontal column-slot overlap (with
+/// `rowspan` 1, since text gaps alone can't reveal a vertical merge). The first
+/// row is treated as the header.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Table {
