@@ -267,23 +267,6 @@ fn is_caption(text: &str) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_caption;
-
-    #[test]
-    fn caption_vs_prose() {
-        // Real captions: keyword + number + separator.
-        assert!(is_caption("Figure 1: A sample diagram."));
-        assert!(is_caption("Table 2. Results summary"));
-        assert!(is_caption("Fig. 3) Overview of the pipeline"));
-        // Prose that merely starts with a caption word is not a caption.
-        assert!(!is_caption("Table 1 shows the results below."));
-        assert!(!is_caption("The table below lists the fields."));
-        assert!(!is_caption("Figure out the answer before proceeding."));
-    }
-}
-
 /// Classify a non-heading block by its leading glyphs.
 fn classify_text(text: &str) -> ElementKind {
     let s = text.trim_start();
@@ -455,4 +438,21 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
         chunks.push(acc.finish());
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_caption;
+
+    #[test]
+    fn caption_vs_prose() {
+        // Real captions: keyword + number + separator.
+        assert!(is_caption("Figure 1: A sample diagram."));
+        assert!(is_caption("Table 2. Results summary"));
+        assert!(is_caption("Fig. 3) Overview of the pipeline"));
+        // Prose that merely starts with a caption word is not a caption.
+        assert!(!is_caption("Table 1 shows the results below."));
+        assert!(!is_caption("The table below lists the fields."));
+        assert!(!is_caption("Figure out the answer before proceeding."));
+    }
 }
