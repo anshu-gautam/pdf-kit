@@ -149,7 +149,7 @@ impl Ctx<'_> {
             .get(b"Alt")
             .ok()
             .and_then(|o| o.as_str().ok())
-            .map(decode_text_string);
+            .map(crate::pdfstr::decode_pdf_text);
         let page_id = elem
             .get(b"Pg")
             .ok()
@@ -366,21 +366,6 @@ fn deref_dict<'a>(doc: &'a LoDoc, obj: &'a Object) -> Option<&'a Dictionary> {
     match obj.as_reference() {
         Ok(id) => doc.get_dictionary(id).ok(),
         Err(_) => obj.as_dict().ok(),
-    }
-}
-
-/// Decode a PDF text string (UTF-16BE with BOM, else Latin-1) for `/Alt` etc.
-fn decode_text_string(bytes: &[u8]) -> String {
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        let pairs = bytes[2..].chunks_exact(2);
-        let trailing = !pairs.remainder().is_empty();
-        let mut units: Vec<u16> = pairs.map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-        if trailing {
-            units.push(0xFFFD);
-        }
-        String::from_utf16_lossy(&units)
-    } else {
-        bytes.iter().map(|&b| b as char).collect()
     }
 }
 

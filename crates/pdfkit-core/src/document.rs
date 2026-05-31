@@ -9,6 +9,7 @@ use lopdf::{Dictionary, Document as LoDoc, Object, ObjectId};
 
 use crate::classify::{self, PageKind, PageSignals};
 use crate::error::PdfError;
+use crate::pdfstr::decode_pdf_text;
 use crate::tagged::{self, StructNode};
 use crate::textrun::{self, TextRun};
 use crate::types::{OpenOptions, PdfInput, TextOptions};
@@ -607,25 +608,6 @@ fn build_metadata(doc: &LoDoc, page_count: usize) -> Metadata {
         page_count,
         pdf_version: doc.version.clone(),
         encrypted: doc.was_encrypted() || doc.is_encrypted(),
-    }
-}
-
-/// Decode a PDF text string: UTF-16BE when it carries a BOM, otherwise treat the
-/// bytes as Latin-1 (a close-enough subset of PDFDocEncoding for v1).
-// TODO(design): implement the full PDFDocEncoding table for the non-BOM case.
-fn decode_pdf_text(bytes: &[u8]) -> String {
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        let pairs = bytes[2..].chunks_exact(2);
-        let remainder = pairs.remainder();
-        let mut units: Vec<u16> = pairs.map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-        // A trailing odd byte is malformed; surface it as U+FFFD rather than
-        // silently dropping it.
-        if !remainder.is_empty() {
-            units.push(0xFFFD);
-        }
-        String::from_utf16_lossy(&units)
-    } else {
-        bytes.iter().map(|&b| b as char).collect()
     }
 }
 
