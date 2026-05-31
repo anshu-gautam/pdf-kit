@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 
-use pdfkit_core::{Document, PdfError, TextRun};
+use pdfkit_core::{group_runs_into_lines, Document, Line, PdfError, TextRun};
 
 /// The kind of a structural element a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,10 +76,12 @@ pub fn chunk_document(doc: &Document, opts: &ChunkOptions) -> Result<Vec<Chunk>,
     }
     let body = body_size(&sizes);
 
-    // Pass 2: lines -> blocks per page, in reading order.
+    // Pass 2: lines -> blocks per page, in reading order. Line grouping (and
+    // multi-column ordering) lives in pdfkit-core::layout so reflow and the
+    // chunker never disagree on line/word/column boundaries.
     let mut blocks: Vec<Block> = Vec::new();
     for (page, runs) in pages_runs {
-        let lines = group_lines(runs);
+        let lines = group_runs_into_lines(runs);
         blocks.extend(group_blocks(lines, body, page));
     }
 
@@ -101,16 +103,6 @@ fn body_size(sizes: &[f32]) -> f32 {
         .unwrap_or(12.0)
 }
 
-struct Line {
-    text: String,
-    y: f32,
-    x0: f32,
-    x1: f32,
-    size: f32,
-    /// Number of wide horizontal gaps (column separators) on this line.
-    columns: usize,
-}
-
 struct Block {
     text: String,
     page: usize,
@@ -118,65 +110,18 @@ struct Block {
     size: f32,
     kind: ElementKind,
     last_y: f32,
+    /// Column band of this block (lines from different bands never merge).
+    column: usize,
     /// Lines in the block, and how many looked tabular (had a column gap).
     lines: usize,
     tabular_lines: usize,
+    /// Per-row x-centers of the wide column gaps, for aligned-table detection.
+    gap_rows: Vec<Vec<f32>>,
 }
 
-/// A gap wider than this many times the font size is treated as a table column
-/// separator rather than a word space.
-const COLUMN_GAP: f32 = 4.0;
-
-/// Group runs into lines by vertical proximity, preserving content-stream order
-/// within each line (the reading order), then order lines top-to-bottom.
-///
-/// Sorting by our approximate x positions would interleave runs whose widths
-/// drifted ("emrplo asyees..."); content order avoids that. A space is inserted
-/// only at a real horizontal word gap, so per-glyph PDFs don't become
-/// "Pr i v i l eg ed".
-fn group_lines(runs: Vec<TextRun>) -> Vec<Line> {
-    let mut lines: Vec<Line> = Vec::new();
-    for r in runs {
-        let y = r.bbox[1];
-        let size = r.font_size;
-        match lines
-            .iter_mut()
-            .find(|l| (l.y - y).abs() <= l.size.max(size) * 0.5)
-        {
-            Some(line) => {
-                let gap = r.bbox[0] - line.x1;
-                let unit = line.size.max(size);
-                if gap > unit * COLUMN_GAP {
-                    // Wide gap = column separator: delimit with a tab and count it.
-                    line.text.push('\t');
-                    line.columns += 1;
-                } else if !line.text.is_empty()
-                    && !line.text.ends_with([' ', '\t'])
-                    && !r.text.starts_with(' ')
-                    && gap > unit * 0.25
-                {
-                    line.text.push(' ');
-                }
-                line.text.push_str(&r.text);
-                line.x0 = line.x0.min(r.bbox[0]);
-                // Running max so an out-of-order run can't shrink x1 (which would
-                // inflate the next gap / spuriously trip a column) or make x1<x0.
-                line.x1 = line.x1.max(r.bbox[2]);
-                line.size = line.size.max(size);
-            }
-            None => lines.push(Line {
-                text: r.text,
-                y,
-                x0: r.bbox[0],
-                x1: r.bbox[2],
-                size,
-                columns: 0,
-            }),
-        }
-    }
-    lines.sort_by(|a, b| b.y.partial_cmp(&a.y).unwrap_or(Ordering::Equal));
-    lines
-}
+/// x-positions of column gaps within this many points are treated as the same
+/// table column boundary (tolerates rendering jitter / proportional widths).
+const ALIGNMENT_TOL: f32 = 8.0;
 
 /// Group lines into blocks and classify each block.
 fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
@@ -188,12 +133,16 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
         let mergeable = !is_heading
             && blocks.last().is_some_and(|b| {
                 b.kind != ElementKind::Heading
+                    // Never merge across a column boundary (issue #4): lines in
+                    // different bands are spatially independent regions.
+                    && b.column == line.column
                     && (b.size - line.size).abs() <= line.size * 0.15
                     && (b.last_y - line.y) <= line.size * 1.9 + 4.0
             });
 
         if mergeable {
             if let Some(b) = blocks.last_mut() {
+                let row_is_tabular = !line.gap_xs.is_empty();
                 b.text.push('\n');
                 b.text.push_str(&line.text);
                 b.bbox[0] = b.bbox[0].min(line.x0);
@@ -202,7 +151,8 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
                 b.bbox[3] = b.bbox[3].max(line.y + line.size);
                 b.last_y = line.y;
                 b.lines += 1;
-                b.tabular_lines += usize::from(line.columns >= 1);
+                b.tabular_lines += usize::from(row_is_tabular);
+                b.gap_rows.push(line.gap_xs);
             }
         } else {
             let kind = if is_heading {
@@ -211,14 +161,16 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
                 classify_text(&line.text)
             };
             blocks.push(Block {
-                text: line.text,
                 page,
                 bbox: [line.x0, line.y, line.x1, line.y + line.size],
                 size: line.size,
                 kind,
                 last_y: line.y,
+                column: line.column,
                 lines: 1,
-                tabular_lines: usize::from(line.columns >= 1),
+                tabular_lines: usize::from(!line.gap_xs.is_empty()),
+                gap_rows: vec![line.gap_xs],
+                text: line.text,
             });
         }
     }
@@ -229,13 +181,59 @@ fn group_blocks(lines: Vec<Line>, body: f32, page: usize) -> Vec<Block> {
         if block.kind == ElementKind::Heading {
             continue;
         }
-        if block.tabular_lines >= 2 && block.tabular_lines * 2 >= block.lines {
+        // Require both density (most rows tabular) AND alignment (a real column
+        // boundary shared by >=2 rows). Alignment is what rejects the
+        // false-positive of a justified / hanging-indent paragraph whose single
+        // wide gap lands at a different x on each line (issue #5).
+        if block.tabular_lines >= 2
+            && block.tabular_lines * 2 >= block.lines
+            && has_aligned_column(&block.gap_rows)
+        {
             block.kind = ElementKind::Table;
         } else if is_caption(&block.text) {
             block.kind = ElementKind::Caption;
         }
     }
     blocks
+}
+
+/// Whether the per-row column-gap x-centers reveal a real table column: a gap
+/// position shared (within [`ALIGNMENT_TOL`]) by at least two distinct rows.
+fn has_aligned_column(gap_rows: &[Vec<f32>]) -> bool {
+    let mut gaps: Vec<(f32, usize)> = gap_rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row, xs)| xs.iter().map(move |&x| (x, row)))
+        .collect();
+    gaps.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+    // Walk the sorted gap positions; a cluster spans points within ALIGNMENT_TOL
+    // of the cluster's first position. A cluster covering >=2 distinct rows is
+    // an aligned column boundary.
+    let mut anchor: Option<f32> = None;
+    let mut rows: Vec<usize> = Vec::new();
+    for (x, row) in gaps {
+        match anchor {
+            Some(a) if x - a <= ALIGNMENT_TOL => {}
+            _ => {
+                if distinct_count(&rows) >= 2 {
+                    return true;
+                }
+                anchor = Some(x);
+                rows.clear();
+            }
+        }
+        rows.push(row);
+    }
+    distinct_count(&rows) >= 2
+}
+
+/// Number of distinct values in a small unsorted slice.
+fn distinct_count(rows: &[usize]) -> usize {
+    let mut seen = rows.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    seen.len()
 }
 
 /// A short block of the form "Figure/Fig./Table/Exhibit/Chart/Diagram/Plate <n><sep>"
@@ -443,7 +441,30 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_caption;
+    use super::{has_aligned_column, is_caption};
+
+    #[test]
+    fn aligned_columns_are_a_table() {
+        // table_doc-like: gaps at ~two column boundaries, consistent across rows
+        // (small jitter within ALIGNMENT_TOL).
+        let rows = vec![vec![173.0, 350.0], vec![170.0, 373.0], vec![173.0, 360.0]];
+        assert!(has_aligned_column(&rows));
+    }
+
+    #[test]
+    fn misaligned_gaps_are_not_a_table() {
+        // A 2-line justified / hanging-indent paragraph: one wide gap per line,
+        // but at unrelated x positions => not a column => not a table (issue #5).
+        let rows = vec![vec![250.0], vec![180.0]];
+        assert!(!has_aligned_column(&rows));
+    }
+
+    #[test]
+    fn single_tabular_row_is_not_a_table() {
+        // A lone row with internal gaps has no second row to align with.
+        let rows = vec![vec![100.0, 300.0]];
+        assert!(!has_aligned_column(&rows));
+    }
 
     #[test]
     fn caption_vs_prose() {

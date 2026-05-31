@@ -7,12 +7,13 @@
 //! match the source document:
 //! - bytes are decoded with the active font's encoding (via lopdf), matching
 //!   lopdf's `extract_text` glyph decoding while preserving position;
-//! - glyph advances come from the font's `/Widths` metrics (simple fonts) rather
-//!   than a fixed estimate, so word gaps — and therefore inserted spaces — are
-//!   accurate. Composite (Type0) fonts and fonts without `/Widths` fall back to
-//!   a 0.5-em estimate.
+//! - glyph advances come from the font's `/Widths` metrics (simple fonts) or
+//!   the descendant CIDFont's `/W` + `/DW` metrics (composite Type0 fonts with
+//!   an Identity CMap), rather than a fixed estimate, so word gaps — and
+//!   therefore inserted spaces — are accurate. Fonts without metrics fall back
+//!   to a 0.5-em-per-glyph estimate.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use lopdf::content::Content;
 use lopdf::{Dictionary, Document as LoDoc, Encoding, Object, ObjectId};
@@ -33,15 +34,35 @@ pub struct TextRun {
 
 /// Fallback advance per glyph, in 1/1000 em, when font metrics are unavailable.
 const DEFAULT_ADVANCE: f32 = 500.0;
+/// Default glyph width for a CIDFont without `/DW` (PDF spec default is 1000).
+const CID_DEFAULT_WIDTH: f32 = 1000.0;
+
+/// How a font turns a show-text byte string into a total advance (1/1000 em).
+enum FontAdvance {
+    /// Simple (single-byte) font with `/Widths`.
+    Simple(SimpleMetrics),
+    /// Composite Type0 font with descendant-CIDFont `/W` + `/DW`.
+    Cid(CidMetrics),
+}
+
+impl FontAdvance {
+    /// Total advance, in 1/1000 em, for a show-text byte string.
+    fn advance_units(&self, bytes: &[u8]) -> f32 {
+        match self {
+            FontAdvance::Simple(m) => bytes.iter().map(|&b| m.width(b as i64)).sum(),
+            FontAdvance::Cid(c) => c.advance_units(bytes),
+        }
+    }
+}
 
 /// Per-font glyph widths for a simple (single-byte) font, in 1/1000 em.
-struct FontMetrics {
+struct SimpleMetrics {
     first_char: i64,
     widths: Vec<f32>,
     default_width: f32,
 }
 
-impl FontMetrics {
+impl SimpleMetrics {
     /// Advance width (1/1000 em) for a one-byte character code. A width of 0 is
     /// a legitimate value (e.g. combining marks) and is returned as-is; the
     /// default is only used when the code is outside the `/Widths` range.
@@ -52,6 +73,42 @@ impl FontMetrics {
             }
         }
         self.default_width
+    }
+}
+
+/// Per-CID glyph widths for a composite (Type0) font, in 1/1000 em.
+struct CidMetrics {
+    /// Default width for any CID not in `widths`.
+    default_width: f32,
+    /// Explicit per-CID widths from the descendant CIDFont's `/W` array.
+    widths: HashMap<u32, f32>,
+    /// Whether the Encoding is an Identity CMap, so a 2-byte code *is* the CID.
+    /// For non-Identity CMaps we cannot map codes to CIDs without the CMap, so
+    /// every 2-byte code gets the default width (still far better than the old
+    /// char-count estimate).
+    identity: bool,
+}
+
+impl CidMetrics {
+    /// Total advance for an Identity-encoded (2-byte) show string.
+    fn advance_units(&self, bytes: &[u8]) -> f32 {
+        let mut sum = 0.0;
+        for pair in bytes.chunks_exact(2) {
+            let code = (u32::from(pair[0]) << 8) | u32::from(pair[1]);
+            sum += if self.identity {
+                self.widths
+                    .get(&code)
+                    .copied()
+                    .unwrap_or(self.default_width)
+            } else {
+                self.default_width
+            };
+        }
+        // A trailing odd byte is malformed; charge it the default width.
+        if bytes.len() % 2 == 1 {
+            sum += self.default_width;
+        }
+        sum
     }
 }
 
@@ -84,7 +141,7 @@ pub(crate) fn text_runs_from_content(
     let mut font_size = 0.0f32;
     let mut leading = 0.0f32;
     let mut encoding: Option<&Encoding> = None;
-    let mut font: Option<&FontMetrics> = None;
+    let mut font: Option<&FontAdvance> = None;
 
     for op in &parsed.operations {
         let ops = &op.operands;
@@ -197,10 +254,11 @@ fn font_encodings(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, Encoding<
     map
 }
 
-/// Build a map of font resource name -> glyph-width metrics for the page's
-/// *simple* fonts (those with a `/Widths` array). Composite/metric-less fonts
-/// are omitted and fall back to the estimate.
-fn font_metrics(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, FontMetrics> {
+/// Build a map of font resource name -> advance metrics for the page's fonts:
+/// `/Widths` for simple fonts, `/W` + `/DW` for composite Type0 fonts. Fonts
+/// with no usable metrics (e.g. base-14) are omitted and fall back to the
+/// per-glyph estimate.
+fn font_metrics(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, FontAdvance> {
     let mut map = BTreeMap::new();
     let Ok(fonts) = doc.get_page_fonts(page_id) else {
         return map;
@@ -213,7 +271,10 @@ fn font_metrics(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, FontMetrics
             .map(|s| s == b"Type0")
             .unwrap_or(false);
         if is_type0 {
-            continue; // composite fonts use 2-byte codes; estimate instead
+            if let Some(cid) = build_cid_metrics(doc, font) {
+                map.insert(name, FontAdvance::Cid(cid));
+            }
+            continue;
         }
         // Map every element to a width, resolving indirect references and using
         // 0.0 for any non-numeric entry, so indices stay aligned with char codes
@@ -249,14 +310,112 @@ fn font_metrics(doc: &LoDoc, page_id: ObjectId) -> BTreeMap<Vec<u8>, FontMetrics
             .unwrap_or(DEFAULT_ADVANCE);
         map.insert(
             name,
-            FontMetrics {
+            FontAdvance::Simple(SimpleMetrics {
                 first_char,
                 widths,
                 default_width,
-            },
+            }),
         );
     }
     map
+}
+
+/// Build [`CidMetrics`] for a composite Type0 font from its descendant CIDFont's
+/// `/DW` (default width) and `/W` (per-CID widths) arrays. Returns `None` when
+/// the descendant font can't be reached.
+fn build_cid_metrics(doc: &LoDoc, font: &Dictionary) -> Option<CidMetrics> {
+    // Identity-H/V means a 2-byte code is the CID directly; otherwise we lack
+    // the CMap and fall back to the default width per code.
+    let identity = font
+        .get(b"Encoding")
+        .ok()
+        .and_then(|o| o.as_name().ok())
+        .map(|n| n.starts_with(b"Identity"))
+        .unwrap_or(false);
+
+    let descendants = deref_array(doc, font.get(b"DescendantFonts").ok())?;
+    let cid_font = deref_dict(doc, descendants.first()?)?;
+
+    let default_width = cid_font
+        .get(b"DW")
+        .ok()
+        .and_then(|o| o.as_float().ok())
+        .unwrap_or(CID_DEFAULT_WIDTH);
+    let widths = deref_array(doc, cid_font.get(b"W").ok())
+        .map(|w| parse_cid_widths(doc, w))
+        .unwrap_or_default();
+
+    Some(CidMetrics {
+        default_width,
+        widths,
+        identity,
+    })
+}
+
+/// Parse a CIDFont `/W` array into a CID -> width map. The array mixes two
+/// forms: `c [w1 w2 ...]` (CIDs `c, c+1, ...`) and `cFirst cLast w` (a constant
+/// width for the inclusive range). Widths are in 1/1000 em.
+fn parse_cid_widths(doc: &LoDoc, arr: &[Object]) -> HashMap<u32, f32> {
+    let mut widths = HashMap::new();
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        // CIDs are 16-bit; a non-CID anchor is malformed, so resync by one
+        // element rather than abandoning the rest of the array. Clamping to u16
+        // also makes the casts and range loops below overflow-proof.
+        let Some(first) = deref_obj(doc, &arr[i])
+            .and_then(|o| o.as_i64().ok())
+            .and_then(|v| u16::try_from(v).ok())
+            .map(u32::from)
+        else {
+            i += 1;
+            continue;
+        };
+        match deref_obj(doc, &arr[i + 1]) {
+            Some(Object::Array(list)) => {
+                // `c [w0 w1 ...]`: CIDs c, c+1, ... — stop at the CID ceiling.
+                for (k, w) in list.iter().enumerate() {
+                    let cid = first + k as u32;
+                    if cid > u32::from(u16::MAX) {
+                        break;
+                    }
+                    if let Some(width) = deref_obj(doc, w).and_then(|o| o.as_float().ok()) {
+                        widths.insert(cid, width);
+                    }
+                }
+                i += 2;
+            }
+            _ => {
+                // `cFirst cLast w`: a constant width over an inclusive range.
+                let last = arr
+                    .get(i + 1)
+                    .and_then(|o| deref_obj(doc, o)?.as_i64().ok())
+                    .and_then(|v| u16::try_from(v).ok())
+                    .map(u32::from);
+                let width = arr
+                    .get(i + 2)
+                    .and_then(|o| deref_obj(doc, o)?.as_float().ok());
+                match (last, width) {
+                    (Some(last), Some(width)) => {
+                        for cid in first..=first.max(last) {
+                            widths.insert(cid, width);
+                        }
+                        i += 3;
+                    }
+                    // Malformed triple: resync on the next element.
+                    _ => i += 1,
+                }
+            }
+        }
+    }
+    widths
+}
+
+/// Follow a single indirect reference if `o` is one, else return it directly.
+fn deref_obj<'a>(doc: &'a LoDoc, o: &'a Object) -> Option<&'a Object> {
+    match o {
+        Object::Reference(id) => doc.get_object(*id).ok(),
+        other => Some(other),
+    }
 }
 
 fn deref_array<'a>(doc: &'a LoDoc, obj: Option<&'a Object>) -> Option<&'a Vec<Object>> {
@@ -295,7 +454,7 @@ fn num(ops: &[Object], i: usize) -> Option<f32> {
 fn show_run(
     bytes: &[u8],
     encoding: Option<&Encoding>,
-    font: Option<&FontMetrics>,
+    font: Option<&FontAdvance>,
     font_size: f32,
     ctm: &Matrix,
     tm: &mut Matrix,
@@ -306,9 +465,10 @@ fn show_run(
         return;
     }
 
-    // Advance in 1/1000 em: real per-code widths for simple fonts, else estimate.
+    // Advance in 1/1000 em: real per-code/per-CID widths when we have metrics,
+    // else a flat per-glyph estimate.
     let advance_units: f32 = match font {
-        Some(metrics) => bytes.iter().map(|&b| metrics.width(b as i64)).sum(),
+        Some(metrics) => metrics.advance_units(bytes),
         None => text.chars().count() as f32 * DEFAULT_ADVANCE,
     };
     let width_text = advance_units / 1000.0 * font_size;
@@ -332,71 +492,97 @@ fn show_run(
     *tm = Matrix::translation(width_text, 0.0).multiply(tm);
 }
 
-/// Layout-aware, readable text for a page: group runs into lines by vertical
-/// position, join words at real horizontal gaps, and separate paragraphs with a
-/// blank line. This replaces lopdf's fragment-per-operation output.
+/// Layout-aware, readable text for a page: group runs into reading-order lines
+/// (column-aware; see [`crate::layout`]), then join them with a blank line at a
+/// paragraph break or a column change. Replaces lopdf's per-operation output.
 pub(crate) fn page_text(doc: &LoDoc, page_id: ObjectId) -> String {
     reflow(page_text_runs(doc, page_id))
 }
 
-struct LineAcc {
-    y: f32,
-    size: f32,
-    x1: f32,
-    text: String,
-}
-
 fn reflow(runs: Vec<TextRun>) -> String {
-    use std::cmp::Ordering;
-
-    // Bucket runs into lines by vertical position, *preserving content-stream
-    // order within each line* (that is the reading order; sorting by x would
-    // interleave runs whose positions drifted).
-    let mut lines: Vec<LineAcc> = Vec::new();
-    for r in runs {
-        let (x0, y, x1) = (r.bbox[0], r.bbox[1], r.bbox[2]);
-        let size = r.font_size;
-        match lines
-            .iter_mut()
-            .find(|l| (l.y - y).abs() <= l.size.max(size) * 0.5)
-        {
-            Some(line) => {
-                let gap = x0 - line.x1;
-                let need_space = !line.text.is_empty()
-                    && !line.text.ends_with(' ')
-                    && !r.text.starts_with(' ')
-                    && gap > line.size.max(size) * 0.25;
-                if need_space {
-                    line.text.push(' ');
-                }
-                line.text.push_str(&r.text);
-                // Running max keeps x1 monotonic so an out-of-order run can't
-                // shrink it (which would inflate the next gap) or make x1 < x0.
-                line.x1 = line.x1.max(x1);
-                line.size = line.size.max(size);
-            }
-            None => lines.push(LineAcc {
-                y,
-                size,
-                x1,
-                text: r.text,
-            }),
-        }
-    }
-
-    lines.sort_by(|a, b| b.y.partial_cmp(&a.y).unwrap_or(Ordering::Equal));
-
+    let lines = crate::layout::group_runs_into_lines(runs);
     let mut out = String::new();
-    let mut prev_y: Option<f32> = None;
+    let mut prev: Option<&crate::layout::Line> = None;
     for line in &lines {
-        if let Some(py) = prev_y {
+        if let Some(p) = prev {
             out.push('\n');
-            if py - line.y > line.size * 1.8 {
+            // Blank line between paragraphs (a large vertical gap within a
+            // column) or whenever the column changes.
+            let paragraph_break = if p.column == line.column {
+                p.y - line.y > line.size * 1.8
+            } else {
+                true
+            };
+            if paragraph_break {
                 out.push('\n');
             }
         }
         out.push_str(line.text.trim_end());
-        prev_y = Some(line.y);
+        prev = Some(line);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_cid_widths, CidMetrics};
+    use lopdf::{Document as LoDoc, Object};
+
+    #[test]
+    fn cid_widths_well_formed_both_w_forms() {
+        let doc = LoDoc::new();
+        // `c [w0 w1]` then `cFirst cLast w`.
+        let arr = vec![
+            Object::Integer(0),
+            Object::Array(vec![Object::Integer(2000), Object::Integer(1000)]),
+            Object::Integer(3),
+            Object::Integer(5),
+            Object::Integer(700),
+        ];
+        let w = parse_cid_widths(&doc, &arr);
+        assert_eq!(w.get(&0), Some(&2000.0));
+        assert_eq!(w.get(&1), Some(&1000.0));
+        assert_eq!(w.get(&3), Some(&700.0));
+        assert_eq!(w.get(&5), Some(&700.0));
+        assert_eq!(w.len(), 5);
+    }
+
+    #[test]
+    fn cid_widths_reject_negative_and_out_of_range_without_panic() {
+        let doc = LoDoc::new();
+        // Negative anchor must be skipped, not wrapped to a huge CID (which
+        // would overflow-panic in debug on the following `first + k`).
+        let neg = vec![
+            Object::Integer(-1),
+            Object::Array(vec![Object::Integer(500), Object::Integer(600)]),
+        ];
+        assert!(parse_cid_widths(&doc, &neg).is_empty());
+        // An absurd range endpoint must not spin a multi-billion-entry loop.
+        let huge = vec![
+            Object::Integer(0),
+            Object::Integer(2_000_000_000),
+            Object::Integer(1000),
+        ];
+        assert!(parse_cid_widths(&doc, &huge).is_empty());
+    }
+
+    #[test]
+    fn cid_advance_uses_widths_then_default() {
+        let metrics = CidMetrics {
+            default_width: 1000.0,
+            widths: [(0u32, 2000.0)].into_iter().collect(),
+            identity: true,
+        };
+        // CID 0 (explicit 2000) + CID 1 (default 1000) = 3000.
+        assert_eq!(metrics.advance_units(&[0x00, 0x00, 0x00, 0x01]), 3000.0);
+        // A trailing odd byte is charged the default width.
+        assert_eq!(metrics.advance_units(&[0x00, 0x00, 0x00]), 3000.0);
+        // Non-identity: every 2-byte code gets the default width.
+        let non_id = CidMetrics {
+            default_width: 500.0,
+            widths: [(0u32, 2000.0)].into_iter().collect(),
+            identity: false,
+        };
+        assert_eq!(non_id.advance_units(&[0x00, 0x00, 0x00, 0x01]), 1000.0);
+    }
 }
