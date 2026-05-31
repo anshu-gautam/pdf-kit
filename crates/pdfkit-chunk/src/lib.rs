@@ -414,17 +414,18 @@ fn pack(blocks: Vec<Block>, opts: &ChunkOptions) -> Vec<Chunk> {
                 c.bbox = union(c.bbox, block.bbox);
             }
             None => {
-                let (text, tokens) = match overlap_seed {
-                    Some(seed) if !seed.is_empty() => {
-                        let text = format!("{seed}\n{}", block.text);
-                        let tokens = estimate_tokens(&text);
-                        (text, tokens)
-                    }
-                    _ => (block.text, block_tokens),
+                let text = match overlap_seed {
+                    Some(seed) if !seed.is_empty() => format!("{seed}\n{}", block.text),
+                    _ => block.text,
                 };
                 current = Some(Acc {
                     text,
-                    tokens,
+                    // Budget decisions track only *content* tokens: the carried
+                    // overlap seed must not reduce the chunk's capacity (else a
+                    // seeded chunk starts near target and flushes prematurely into
+                    // tiny chunks). token_estimate still counts the seed (finish()
+                    // recomputes from the full text).
+                    tokens: block_tokens,
                     page: block.page,
                     kind: block.kind,
                     heading_path: path,

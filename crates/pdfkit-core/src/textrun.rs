@@ -57,15 +57,24 @@ impl FontMetrics {
 
 /// Extract positioned text runs from a page's content stream.
 pub(crate) fn page_text_runs(doc: &LoDoc, page_id: ObjectId) -> Vec<TextRun> {
-    let encodings = font_encodings(doc, page_id);
-    let metrics = font_metrics(doc, page_id);
-
     let Ok(content) = doc.get_page_content(page_id) else {
         return Vec::new();
     };
     let Ok(parsed) = Content::decode(&content) else {
         return Vec::new();
     };
+    text_runs_from_content(doc, page_id, &parsed)
+}
+
+/// Extract runs from an already-decoded content stream, so callers that also
+/// need other content analysis (e.g. image coverage) can share one decode.
+pub(crate) fn text_runs_from_content(
+    doc: &LoDoc,
+    page_id: ObjectId,
+    parsed: &Content,
+) -> Vec<TextRun> {
+    let encodings = font_encodings(doc, page_id);
+    let metrics = font_metrics(doc, page_id);
 
     let mut runs = Vec::new();
     let mut ctm = Matrix::IDENTITY;

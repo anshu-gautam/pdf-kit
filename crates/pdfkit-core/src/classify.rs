@@ -78,36 +78,65 @@ pub(crate) struct ImageDraw {
     pub ctm: [f32; 6],
 }
 
-/// `(image_count, image_coverage)` for a page: every image `Do` contributes the
-/// area of its unit square under the CTM, divided by the page area.
-pub(crate) fn image_signals(
+/// Compute all of a page's [`PageSignals`] from a *single* content-stream decode,
+/// shared between text-char counting and image-coverage measurement (avoids
+/// decoding/walking the page twice, and avoids the discarded reflow that
+/// computing this via `Page::text()` used to incur).
+pub(crate) fn page_signals(
     doc: &LoDoc,
     page_id: ObjectId,
     page_w: f32,
     page_h: f32,
-) -> (usize, f32) {
-    let draws = image_draws(doc, page_id);
+) -> PageSignals {
+    let parsed = doc
+        .get_page_content(page_id)
+        .ok()
+        .and_then(|content| Content::decode(&content).ok());
+    let (text_char_count, draws) = match parsed {
+        Some(parsed) => {
+            let runs = crate::textrun::text_runs_from_content(doc, page_id, &parsed);
+            let count = runs
+                .iter()
+                .flat_map(|r| r.text.chars())
+                .filter(|c| !c.is_whitespace())
+                .count();
+            (count, image_draws_from_content(doc, page_id, &parsed))
+        }
+        None => (0, Vec::new()),
+    };
     let area: f32 = draws
         .iter()
         .map(|d| (d.ctm[0] * d.ctm[3] - d.ctm[1] * d.ctm[2]).abs())
         .sum();
-    let coverage = (area / (page_w * page_h).max(1.0)).clamp(0.0, 1.0);
-    (draws.len(), coverage)
+    PageSignals {
+        text_char_count,
+        image_count: draws.len(),
+        image_coverage: (area / (page_w * page_h).max(1.0)).clamp(0.0, 1.0),
+    }
 }
 
 /// Walk a page's content stream, tracking the CTM (`q`/`Q`/`cm`), and record an
 /// [`ImageDraw`] for every `Do` that paints an image XObject.
 pub(crate) fn image_draws(doc: &LoDoc, page_id: ObjectId) -> Vec<ImageDraw> {
-    let images = image_xobjects(doc, page_id);
-    if images.is_empty() {
-        return Vec::new();
-    }
     let Ok(content) = doc.get_page_content(page_id) else {
         return Vec::new();
     };
     let Ok(parsed) = Content::decode(&content) else {
         return Vec::new();
     };
+    image_draws_from_content(doc, page_id, &parsed)
+}
+
+/// Image draws from an already-decoded content stream.
+pub(crate) fn image_draws_from_content(
+    doc: &LoDoc,
+    page_id: ObjectId,
+    parsed: &Content,
+) -> Vec<ImageDraw> {
+    let images = image_xobjects(doc, page_id);
+    if images.is_empty() {
+        return Vec::new();
+    }
 
     let mut ctm = Matrix::IDENTITY;
     let mut stack: Vec<Matrix> = Vec::new();

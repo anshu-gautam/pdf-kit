@@ -241,17 +241,10 @@ impl Page<'_> {
     /// Raw classification signals for this page (text char count, image count,
     /// image coverage). Exposed so callers can apply their own thresholds.
     pub fn signals(&self) -> PageSignals {
-        let text_char_count = self
-            .text()
-            .map(|t| t.chars().filter(|c| !c.is_whitespace()).count())
-            .unwrap_or(0);
         let (w, h) = self.size_points();
-        let (image_count, image_coverage) = classify::image_signals(&self.doc.inner, self.id, w, h);
-        PageSignals {
-            text_char_count,
-            image_count,
-            image_coverage,
-        }
+        // One content decode for both text-char count and image coverage; no
+        // reflow (we only need the count, not laid-out text).
+        classify::page_signals(&self.doc.inner, self.id, w, h)
     }
 
     /// Classify this page (text-based / scanned / image-only / mixed).
