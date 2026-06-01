@@ -29,7 +29,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --exclude pdfkit-api -- -D warnings
 
   test-default:
     name: test (default) ${{ matrix.os }}
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude pdfkit-api
 
   test-minimal:
     name: test (minimal, zero-native-dep)
@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --no-default-features --features render-native
+      - run: cargo test --workspace --no-default-features --features render-native --exclude pdfkit-api
 
   render-pdfium:
     name: render-pdfium build
@@ -63,6 +63,31 @@ jobs:
       # The PDFIUM library binds at runtime, so this only proves the backend
       # compiles; rendering with it requires scripts/fetch-pdfium.sh.
       - run: cargo build -p pdfkit-render -p pdfkit-cli --features render-pdfium
+      # Lint + test pdfkit-api under the render-pdfium and ocr cfg paths. PDFIUM/OCR
+      # bind their libs at runtime, so these prove the feature code compiles and the
+      # unit tests pass; they don't actually render or OCR.
+      - run: cargo clippy -p pdfkit-api --all-targets --features render-pdfium -- -D warnings
+      - run: cargo test -p pdfkit-api --features render-pdfium
+      - run: cargo build -p pdfkit-api --features ocr
+
+  api-build:
+    name: pdfkit-api build + test ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # pdfkit-api is excluded from the workspace lib gates above (it is the only
+      # crate allowed an axum/tokio stack); lint and test it on its own, on every
+      # supported OS, here.
+      - run: cargo clippy -p pdfkit-api --all-targets -- -D warnings
+      - run: cargo test -p pdfkit-api
 
   wasm-build:
     name: wasm build + test
@@ -84,7 +109,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      - run: cargo build --workspace --exclude pdfkit-api
 
   ocr-tesseract:
     name: ocr-tesseract build

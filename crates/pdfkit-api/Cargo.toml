@@ -1,0 +1,34 @@
+[package]
+name = "pdfkit-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Self-hostable HTTP API over the pdfkit library (PRD §13). A leaf binary, excluded from the workspace default-members and lib CI gates."
+publish = false
+
+[features]
+default = []
+# High-fidelity rendering for /v1/render (PDFIUM native backend; PRD §13.2).
+# render-native gives us encode_png; render-pdfium adds the PdfiumRenderer.
+render-pdfium = ["dep:pdfkit-render", "pdfkit-render/render-native", "pdfkit-render/render-pdfium"]
+# Local ONNX OCR for the `ocr` request flag (PRD §13.6); no system dependency.
+# Placeholder wiring: the request flag is accepted today but the provider call is
+# deferred (see PRD §16). Kept so /version can report build capability.
+ocr = ["dep:pdfkit-ocr", "pdfkit-ocr/ocr-ocrs"]
+
+[dependencies]
+pdfkit-core = { path = "../pdfkit-core" }
+pdfkit-chunk = { path = "../pdfkit-chunk" }
+pdfkit-edit = { path = "../pdfkit-edit" }
+pdfkit-render = { path = "../pdfkit-render", optional = true }
+pdfkit-ocr = { path = "../pdfkit-ocr", optional = true }
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tower-http = { version = "0.6", features = ["cors", "timeout", "trace"] }
+utoipa = "5"
