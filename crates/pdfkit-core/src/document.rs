@@ -39,8 +39,14 @@ impl Engine {
         let inner = match (input, opts.password.as_deref()) {
             (PdfInput::Path(p), Some(pw)) => LoDoc::load_with_password(&p, pw),
             (PdfInput::Path(p), None) => LoDoc::load(&p),
-            (PdfInput::Bytes(b), Some(pw)) => LoDoc::load_mem_with_password(&b, pw),
-            (PdfInput::Bytes(b), None) => LoDoc::load_mem(&b),
+            (PdfInput::Bytes(b), Some(pw)) => {
+                preflight_xref_stream_widths(&b)?;
+                LoDoc::load_mem_with_password(&b, pw)
+            }
+            (PdfInput::Bytes(b), None) => {
+                preflight_xref_stream_widths(&b)?;
+                LoDoc::load_mem(&b)
+            }
         }
         .map_err(PdfError::from)?;
         // lopdf loads an encrypted document even when the password is missing,
@@ -51,6 +57,118 @@ impl Engine {
         }
         Ok(Document::from_lopdf(inner))
     }
+}
+
+/// Guard lopdf from attempting enormous allocations while parsing malformed
+/// xref stream `/W` arrays. PDF xref stream field widths are byte counts; sane
+/// files use tiny values (commonly 0..8). Values above this limit cannot be
+/// useful for this toolkit and are rejected before the backend parser allocates.
+fn preflight_xref_stream_widths(bytes: &[u8]) -> Result<(), PdfError> {
+    const MAX_XREF_FIELD_BYTES: u64 = 16;
+
+    let mut pos = 0usize;
+    while let Some(offset) = find_subslice(&bytes[pos..], b"/W") {
+        let key = pos + offset;
+        pos = key + 2;
+
+        if !is_delimiter(bytes.get(pos).copied()) || !looks_like_xref_stream_dict(bytes, key) {
+            continue;
+        }
+
+        let mut i = skip_ascii_whitespace(bytes, pos);
+        if bytes.get(i) != Some(&b'[') {
+            continue;
+        }
+        i += 1;
+
+        for _ in 0..3 {
+            i = skip_ascii_whitespace(bytes, i);
+            if bytes.get(i) == Some(&b']') {
+                break;
+            }
+            if bytes.get(i) == Some(&b'-') {
+                return Err(PdfError::malformed());
+            }
+            let Some((value, next)) = parse_unsigned_decimal(bytes, i) else {
+                break;
+            };
+            if value > MAX_XREF_FIELD_BYTES {
+                return Err(PdfError::malformed());
+            }
+            i = next;
+        }
+    }
+
+    Ok(())
+}
+
+fn looks_like_xref_stream_dict(bytes: &[u8], pos: usize) -> bool {
+    let start = pos.saturating_sub(512);
+    let end = bytes.len().min(pos.saturating_add(512));
+    let window = &bytes[start..end];
+    find_subslice(window, b"/Type/XRef").is_some()
+        || find_subslice(window, b"/Type /XRef").is_some()
+        || find_subslice(window, b"/Type\t/XRef").is_some()
+        || find_subslice(window, b"/Type\n/XRef").is_some()
+        || find_subslice(window, b"/Type\r/XRef").is_some()
+}
+
+fn parse_unsigned_decimal(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
+    let mut i = start;
+    let mut value = 0u64;
+    let mut saw_digit = false;
+    while let Some(byte) = bytes.get(i).copied() {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        saw_digit = true;
+        value = value
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(byte - b'0')))
+            .unwrap_or(u64::MAX);
+        i += 1;
+    }
+    saw_digit.then_some((value, i))
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut pos: usize) -> usize {
+    while matches!(
+        bytes.get(pos),
+        Some(b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+    ) {
+        pos += 1;
+    }
+    pos
+}
+
+fn is_delimiter(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(
+            b'\0'
+                | b'\t'
+                | b'\n'
+                | b'\x0c'
+                | b'\r'
+                | b' '
+                | b'('
+                | b')'
+                | b'<'
+                | b'>'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'/'
+                | b'%'
+        )
+    )
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Document-level metadata (PRD §4.1), from the information dictionary.

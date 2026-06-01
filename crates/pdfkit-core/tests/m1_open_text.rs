@@ -117,3 +117,23 @@ fn correct_password_opens_encrypted() {
     let text = doc.text(TextOptions::default()).expect("text");
     assert!(text.contains("encrypted"), "got {text:?}");
 }
+
+#[test]
+fn oversized_xref_stream_width_is_rejected_before_backend_allocation() {
+    let mut mutated = pdfkit_fixtures::multi_heading();
+    let needle = b"/W[1 4 2]";
+    let pos = mutated
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("fixture has xref stream width array");
+    mutated.splice(
+        pos..pos + needle.len(),
+        b"/W[1 4777777777777777 2]".iter().copied(),
+    );
+
+    let err = engine()
+        .open(mutated, OpenOptions::default())
+        .expect_err("malformed xref stream width must fail before allocation");
+
+    assert!(matches!(err, PdfError::Format(_)), "got {err:?}");
+}
