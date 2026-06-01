@@ -72,22 +72,50 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-/// CORS from `PDFKIT_ALLOWED_ORIGINS` (comma-separated). If unset, fall back to
-/// a permissive policy for local development (PRD §13.5).
+/// CORS from `PDFKIT_ALLOWED_ORIGINS` (comma-separated origins, or `*` for any).
+/// Default (unset/empty) DENIES cross-origin — a safe default for a self-hosted
+/// service; set the env var to allow a frontend (PRD §13.5).
 fn cors_layer() -> CorsLayer {
-    match std::env::var("PDFKIT_ALLOWED_ORIGINS") {
-        Ok(s) if !s.trim().is_empty() => {
-            let origins: Vec<HeaderValue> = s
-                .split(',')
-                .filter_map(|o| o.trim().parse::<HeaderValue>().ok())
-                .collect();
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(origins))
-                .allow_methods(Any)
-                .allow_headers(Any)
-        }
-        _ => CorsLayer::permissive(),
+    let raw = std::env::var("PDFKIT_ALLOWED_ORIGINS").unwrap_or_default();
+    let raw = raw.trim();
+
+    if raw.is_empty() {
+        eprintln!(
+            "pdfkit-api: PDFKIT_ALLOWED_ORIGINS is unset — cross-origin requests are denied. \
+             Set it to a comma-separated origin list (or `*`) to allow a frontend."
+        );
+        return CorsLayer::new();
     }
+
+    // `*` cannot be passed to AllowOrigin::list (it panics); map it to Any.
+    if raw == "*" {
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+    }
+
+    let mut origins: Vec<HeaderValue> = Vec::new();
+    for o in raw.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+        match o.parse::<HeaderValue>() {
+            Ok(v) => origins.push(v),
+            Err(_) => {
+                eprintln!("pdfkit-api: ignoring invalid origin in PDFKIT_ALLOWED_ORIGINS: {o}")
+            }
+        }
+    }
+
+    if origins.is_empty() {
+        eprintln!(
+            "pdfkit-api: no valid origins parsed from PDFKIT_ALLOWED_ORIGINS — cross-origin requests are denied."
+        );
+        return CorsLayer::new();
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 /// Build the application router. Kept separate from `main` so it is testable

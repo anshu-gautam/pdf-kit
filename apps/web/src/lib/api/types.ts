@@ -12,6 +12,18 @@ export type PageImage = {
   png_base64: string;
 };
 
+export type Background = "white" | "transparent";
+
+/** Page-render options shared by /v1/render and extract image modes. */
+export type RenderParams = {
+  page?: number;
+  dpi?: number;
+  scale?: number;
+  width?: number;
+  height?: number;
+  background?: Background;
+};
+
 export type ExtractMode = "auto" | "text" | "images" | "both";
 
 export type ExtractRequest = {
@@ -22,6 +34,8 @@ export type ExtractRequest = {
   min_text_chars?: number;
   max_text_chars?: number;
   ocr?: boolean;
+  /** How to render page images for mode = images | both. */
+  render?: RenderParams;
 };
 
 export type ExtractResponse = {
@@ -84,14 +98,6 @@ export type ChunkRequest = {
   contextual_prefix?: boolean;
 };
 
-export type RenderRequest = {
-  page?: number;
-  dpi?: number;
-  scale?: number;
-  width?: number;
-  height?: number;
-  background?: "white" | "transparent";
-  max_pixels?: number;
-  max_dimension?: number;
+export type RenderRequest = RenderParams & {
   password?: string;
 };

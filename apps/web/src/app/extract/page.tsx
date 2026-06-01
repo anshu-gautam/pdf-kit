@@ -14,7 +14,7 @@ import {
   Segmented,
   Textarea,
 } from "@/components/ui";
-import { ApiError, extract } from "@/lib/api/client";
+import { errorMessage, extract } from "@/lib/api/client";
 import type { ExtractMode, ExtractResponse } from "@/lib/api/types";
 
 const MODES = [
@@ -43,7 +43,7 @@ export default function ExtractPage() {
         description: `${r.pages_processed.length} page(s) processed`,
       });
     } catch (e) {
-      const msg = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      const msg = errorMessage(e);
       setError(msg);
       toast.error("Extraction failed", { description: msg });
     } finally {
@@ -59,7 +59,10 @@ export default function ExtractPage() {
 
   return (
     <div>
-      <PageHeader title="Extract" subtitle="Pull text and rendered page images from a PDF." />
+      <PageHeader
+        title="Extract"
+        subtitle="Pull text from a PDF. Image modes render page images and need the render-pdfium backend."
+      />
 
       <Card className="space-y-6 p-6">
         <Uploader

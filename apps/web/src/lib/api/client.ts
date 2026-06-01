@@ -28,13 +28,26 @@ export class ApiError extends Error {
   }
 }
 
+/** Format any thrown error for a user-facing message. */
+export function errorMessage(e: unknown): string {
+  if (e instanceof ApiError) return `${e.code}: ${e.message}`;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
 async function ensureOk(res: Response): Promise<Response> {
   if (res.ok) return res;
-  let body: ApiErrorBody | string;
+  // Read the body ONCE, then try to parse the JSON ApiError envelope. Calling
+  // res.json() then res.text() would throw "body stream already read".
+  const raw = await res.text().catch(() => "");
+  let body: ApiErrorBody | string = raw || `${res.status} ${res.statusText}`.trim();
   try {
-    body = (await res.json()) as ApiErrorBody;
+    const parsed = JSON.parse(raw) as Partial<ApiErrorBody>;
+    if (parsed && typeof parsed === "object" && typeof parsed.message === "string") {
+      body = { code: parsed.code ?? "error", message: parsed.message };
+    }
   } catch {
-    body = await res.text();
+    // Not JSON (e.g. a 413/408/proxy-500 text/HTML body) — keep the raw text.
   }
   throw new ApiError(res.status, body);
 }

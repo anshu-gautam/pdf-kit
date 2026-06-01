@@ -2,11 +2,13 @@
 //! thread, and map results/errors to responses (PRD §13.5, §13.6).
 
 use std::io::{Cursor, Write};
+use std::sync::LazyLock;
 
 use axum::extract::Multipart;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use tokio::sync::Semaphore;
 
 use crate::dto::*;
 use crate::error::ApiErr;
@@ -43,9 +45,12 @@ async fn collect(mut mp: Multipart) -> Result<Upload, ApiErr> {
                         .map_err(|e| ApiErr::bad_request("bad_multipart", e.to_string()))?,
                 );
             }
-            // Drain unknown parts so the stream advances.
+            // Drain unknown parts so the stream advances (surface read errors).
             _ => {
-                let _ = field.bytes().await;
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiErr::bad_request("bad_multipart", e.to_string()))?;
             }
         }
     }
@@ -103,13 +108,36 @@ fn validate_pdf(bytes: &[u8]) -> Result<(), ApiErr> {
     }
 }
 
+/// Caps concurrent CPU-bound jobs so a flood of slow/large requests can't
+/// saturate tokio's blocking-thread pool. The request TimeoutLayer returns 408
+/// to the client but does NOT cancel an in-flight blocking task, so this permit
+/// bounds how many can run at once. Default = available parallelism (min 2);
+/// override with `PDFKIT_MAX_CONCURRENCY`.
+static CPU_LIMIT: LazyLock<Semaphore> = LazyLock::new(|| {
+    let permits = std::env::var("PDFKIT_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .max(2)
+        });
+    Semaphore::new(permits)
+});
+
 /// Run CPU-bound library work on a blocking worker so the async runtime isn't
-/// starved (PRD §13.5).
+/// starved, under a global concurrency cap (PRD §13.5).
 async fn blocking<T, F>(f: F) -> Result<T, ApiErr>
 where
     F: FnOnce() -> Result<T, pdfkit_core::PdfError> + Send + 'static,
     T: Send + 'static,
 {
+    let _permit = CPU_LIMIT
+        .acquire()
+        .await
+        .map_err(|_| ApiErr::internal("concurrency limiter closed"))?;
     match tokio::task::spawn_blocking(f).await {
         Ok(result) => result.map_err(ApiErr::from),
         Err(e) => Err(ApiErr::internal(format!("worker join error: {e}"))),
@@ -161,6 +189,14 @@ pub async fn extract(mp: Multipart) -> Result<Json<ExtractResponse>, ApiErr> {
     let mut up = collect(mp).await?;
     let bytes = up.one_file()?;
     let req: ExtractRequest = up.parse_options()?;
+    // Page-image modes go through the render backend; gate them like /v1/render
+    // so a default (non-pdfium) build returns a clear 501 instead of blank PNGs.
+    #[cfg(not(feature = "render-pdfium"))]
+    if matches!(req.mode, ExtractMode::Images | ExtractMode::Both) {
+        return Err(ApiErr::not_implemented(
+            "extract image modes require a build with --features render-pdfium (PRD §13.2)",
+        ));
+    }
     let resp = blocking(move || service::run_extract(bytes, &req)).await?;
     Ok(Json(resp))
 }
@@ -300,6 +336,12 @@ pub async fn edit_split(mp: Multipart) -> Result<Response, ApiErr> {
     let mut up = collect(mp).await?;
     let bytes = up.one_file()?;
     let req: SplitRequest = up.require_options()?;
+    if req.ranges.is_empty() {
+        return Err(ApiErr::bad_request(
+            "empty_ranges",
+            "at least one page range is required",
+        ));
+    }
     let ranges: Vec<(usize, usize)> = req.ranges.iter().map(|r| (r[0], r[1])).collect();
     let parts = blocking(move || service::run_split(bytes, &ranges)).await?;
     let zipped = zip_parts(&parts)?;
@@ -327,6 +369,12 @@ pub async fn edit_rotate(mp: Multipart) -> Result<Response, ApiErr> {
     let mut up = collect(mp).await?;
     let bytes = up.one_file()?;
     let req: RotateRequest = up.require_options()?;
+    if let Some(bad) = req.rotations.iter().find(|r| r.degrees % 90 != 0) {
+        return Err(ApiErr::bad_request(
+            "invalid_degrees",
+            format!("degrees must be a multiple of 90, got {}", bad.degrees),
+        ));
+    }
     let rotations: Vec<(usize, i32)> = req.rotations.iter().map(|r| (r.page, r.degrees)).collect();
     let pdf = blocking(move || service::run_rotate(bytes, &rotations)).await?;
     Ok(pdf_response(pdf))

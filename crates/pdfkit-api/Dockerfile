@@ -20,10 +20,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libstdc++6 ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/pdfkit-api /usr/local/bin/pdfkit-api
-# The runtime loader looks for PDFIUM at $PDFKIT_PDFIUM_LIB, then this cache dir.
-COPY --from=build /root/.cache/pdfkit/pdfium /opt/pdfium
-ENV PDFKIT_PDFIUM_LIB=/opt/pdfium/lib/libpdfium.so \
-    PDFKIT_API_ADDR=0.0.0.0:8080 \
+# Keep PDFIUM in the cache dir the runtime loader auto-discovers (it derives the
+# platform library filename itself), rather than hardcoding a brittle path. Set
+# PDFKIT_PDFIUM_LIB at run time to override.
+COPY --from=build /root/.cache/pdfkit/pdfium /root/.cache/pdfkit/pdfium
+ENV PDFKIT_API_ADDR=0.0.0.0:8080 \
     PDFKIT_MAX_BODY_BYTES=52428800 \
     PDFKIT_REQUEST_TIMEOUT_SECS=60
 EXPOSE 8080

@@ -7,12 +7,12 @@ import { Dropzone } from "@/components/pdf/Dropzone";
 import { Uploader } from "@/components/pdf/Uploader";
 import { Button, Card, ErrorBox, Field, Input, PageHeader, Textarea } from "@/components/ui";
 import {
-  ApiError,
   editFill,
   editMerge,
   editRotate,
   editSplit,
   editWatermark,
+  errorMessage,
 } from "@/lib/api/client";
 import { downloadBlob } from "@/lib/download";
 
@@ -26,7 +26,7 @@ function useEditAction() {
       downloadBlob(await fn(), filename);
       toast.success(`Saved ${filename}`);
     } catch (e) {
-      const msg = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      const msg = errorMessage(e);
       setError(msg);
       toast.error("Edit failed", { description: msg });
     } finally {
@@ -72,12 +72,25 @@ function MergeSection() {
       title="Merge"
       description="Combine two or more PDFs into one, in order."
     >
-      <Dropzone multiple onFiles={setFiles} />
+      <Dropzone
+        multiple
+        onFiles={(dropped) =>
+          setFiles((prev) => {
+            // Accumulate across drops (dedupe by name+size) rather than replace.
+            const byKey = new Map(prev.map((f) => [`${f.name}:${f.size}`, f]));
+            for (const f of dropped) byKey.set(`${f.name}:${f.size}`, f);
+            return [...byKey.values()];
+          })
+        }
+      />
       {files.length > 0 && (
-        <p className="text-[13px] text-muted-foreground">
-          <span className="font-medium text-foreground tabular-nums">{files.length}</span> file(s):{" "}
-          {files.map((f) => f.name).join(", ")}
-        </p>
+        <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
+          <span className="shrink-0 font-medium tabular-nums text-foreground">{files.length}</span>
+          <span className="min-w-0 flex-1 truncate">{files.map((f) => f.name).join(", ")}</span>
+          <Button variant="ghost" size="sm" onClick={() => setFiles([])}>
+            Clear
+          </Button>
+        </div>
       )}
       <Button
         className="self-start"
@@ -121,7 +134,19 @@ function SplitSection() {
         className="self-start"
         disabled={!file}
         loading={busy}
-        onClick={() => file && run(() => editSplit(file, parseRanges(ranges)), "split.zip")}
+        onClick={() =>
+          file &&
+          run(() => {
+            const parsed = parseRanges(ranges);
+            if (
+              parsed.length === 0 ||
+              parsed.some(([a, b]) => !Number.isInteger(a) || !Number.isInteger(b) || a < 1 || b < a)
+            ) {
+              throw new Error("Enter valid one-based ranges, e.g. 1-1, 2-3.");
+            }
+            return editSplit(file, parsed);
+          }, "split.zip")
+        }
       >
         Split → ZIP
       </Button>

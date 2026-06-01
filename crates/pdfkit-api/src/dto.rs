@@ -41,8 +41,8 @@ pub struct RenderParams {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub background: Background,
-    pub max_pixels: Option<u32>,
-    pub max_dimension: Option<u32>,
+    // NOTE: the pixel/dimension safety budget is intentionally NOT client-settable
+    // — a caller must not be able to raise the core render budget (DoS guard).
 }
 
 impl Default for RenderParams {
@@ -54,8 +54,6 @@ impl Default for RenderParams {
             width: None,
             height: None,
             background: Background::White,
-            max_pixels: None,
-            max_dimension: None,
         }
     }
 }
@@ -73,8 +71,9 @@ impl RenderParams {
                 Background::Transparent => pdfkit_core::Background::Transparent,
             },
             forms: d.forms,
-            max_pixels: self.max_pixels.unwrap_or(d.max_pixels),
-            max_dimension: self.max_dimension.unwrap_or(d.max_dimension),
+            // Server-controlled budget — clients cannot widen it.
+            max_pixels: d.max_pixels,
+            max_dimension: d.max_dimension,
         }
     }
 }

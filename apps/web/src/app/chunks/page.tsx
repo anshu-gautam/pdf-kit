@@ -5,7 +5,7 @@ import { Copy, Download } from "lucide-react";
 import { toast } from "sonner";
 import { Uploader } from "@/components/pdf/Uploader";
 import { Badge, Button, Card, ErrorBox, Field, Input, PageHeader, Segmented } from "@/components/ui";
-import { ApiError, chunks } from "@/lib/api/client";
+import { chunks, errorMessage } from "@/lib/api/client";
 import { downloadBlob } from "@/lib/download";
 import type { ChunkFormat } from "@/lib/api/types";
 
@@ -25,6 +25,10 @@ export default function ChunksPage() {
 
   async function run() {
     if (!file) return;
+    if (!Number.isFinite(targetTokens) || targetTokens < 1) {
+      setError("Target tokens must be a positive number.");
+      return;
+    }
     setBusy(true);
     setError(null);
     setOutput(null);
@@ -37,7 +41,7 @@ export default function ChunksPage() {
       setOutput(r.format === "json" ? JSON.stringify(r.json, null, 2) : r.markdown);
       toast.success("Chunks ready");
     } catch (e) {
-      const msg = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      const msg = errorMessage(e);
       setError(msg);
       toast.error("Chunking failed", { description: msg });
     } finally {

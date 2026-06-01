@@ -25,7 +25,7 @@ pdfkit-edit = { path = "../pdfkit-edit" }
 pdfkit-render = { path = "../pdfkit-render", optional = true }
 pdfkit-ocr = { path = "../pdfkit-ocr", optional = true }
 axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"

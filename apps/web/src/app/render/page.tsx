@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download } from "lucide-react";
 import { toast } from "sonner";
 import { Uploader } from "@/components/pdf/Uploader";
 import { Badge, Button, Card, ErrorBox, Field, Input, PageHeader } from "@/components/ui";
-import { ApiError, renderPage } from "@/lib/api/client";
+import { errorMessage, renderPage } from "@/lib/api/client";
 import { downloadBlob } from "@/lib/download";
 
 export default function RenderPage() {
@@ -19,6 +19,10 @@ export default function RenderPage() {
 
   async function run() {
     if (!file) return;
+    if (!Number.isFinite(page) || page < 1 || !Number.isFinite(dpi) || dpi < 1) {
+      setError("Page and DPI must be whole numbers ≥ 1.");
+      return;
+    }
     setBusy(true);
     setError(null);
     if (pngUrl) URL.revokeObjectURL(pngUrl);
@@ -30,13 +34,20 @@ export default function RenderPage() {
       setPngUrl(URL.createObjectURL(b));
       toast.success(`Rendered page ${page}`);
     } catch (e) {
-      const msg = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+      const msg = errorMessage(e);
       setError(msg);
       toast.error("Render failed", { description: msg });
     } finally {
       setBusy(false);
     }
   }
+
+  // Revoke the preview blob URL when it changes or the component unmounts.
+  useEffect(() => {
+    return () => {
+      if (pngUrl) URL.revokeObjectURL(pngUrl);
+    };
+  }, [pngUrl]);
 
   return (
     <div>

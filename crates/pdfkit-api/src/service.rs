@@ -21,6 +21,10 @@ fn save_editor(editor: &PdfEditor) -> Result<Vec<u8>, PdfError> {
     Ok(out)
 }
 
+/// Upper bound on pages scanned by /v1/metadata and /v1/figures, so a PDF that
+/// declares a very large page tree can't tie up a worker for the whole timeout.
+const MAX_SCAN_PAGES: usize = 5_000;
+
 // ---------------------------------------------------------------------------
 // Read path
 // ---------------------------------------------------------------------------
@@ -38,7 +42,7 @@ pub fn run_metadata(
     let outline = doc.outline().iter().map(OutlineNode::from).collect();
 
     let mut links = Vec::new();
-    for p in 1..=doc.page_count() {
+    for p in 1..=doc.page_count().min(MAX_SCAN_PAGES) {
         let page_links = doc.page(p)?.links();
         if !page_links.is_empty() {
             links.push(PageLinks {
@@ -76,9 +80,8 @@ pub fn run_chunks(bytes: Vec<u8>, req: &ChunkRequest) -> Result<ChunkOutput, Pdf
     let chunks = pdfkit_chunk::chunk_document(&doc, &req.to_options())?;
     match req.format {
         ChunkFormat::Json => {
-            let chunks_value: serde_json::Value =
-                serde_json::from_str(&pdfkit_chunk::to_json(&chunks)?)
-                    .map_err(|e| PdfError::Backend(format!("chunk json: {e}")))?;
+            let chunks_value = serde_json::to_value(&chunks)
+                .map_err(|e| PdfError::Backend(format!("chunk json: {e}")))?;
             Ok(ChunkOutput::Json(serde_json::json!({
                 "chunks": chunks_value,
                 "document_text": pdfkit_chunk::document_text(&chunks),
@@ -91,7 +94,7 @@ pub fn run_chunks(bytes: Vec<u8>, req: &ChunkRequest) -> Result<ChunkOutput, Pdf
 pub fn run_figures(bytes: Vec<u8>, password: Option<String>) -> Result<FiguresResponse, PdfError> {
     let doc = open_doc(bytes, password)?;
     let mut pages = Vec::new();
-    for p in 1..=doc.page_count() {
+    for p in 1..=doc.page_count().min(MAX_SCAN_PAGES) {
         let regions = doc.page(p)?.image_regions();
         if !regions.is_empty() {
             pages.push(PageFigures {

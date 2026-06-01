@@ -59,24 +59,6 @@ export function ErrorBox({ error }: { error: string | null }) {
   );
 }
 
-export function EmptyState({
-  icon,
-  title,
-  description,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex flex-col items-center gap-3 py-10 text-center">
-      <div className="rounded-full bg-surface-subtle p-3 text-muted-foreground [&_svg]:size-6">{icon}</div>
-      <h3 className="text-sm font-medium text-foreground">{title}</h3>
-      <p className="max-w-sm text-sm text-muted-foreground">{description}</p>
-    </div>
-  );
-}
-
 export function PageHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div className="mb-8 space-y-1.5">

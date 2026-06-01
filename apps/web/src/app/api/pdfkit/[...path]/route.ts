@@ -1,6 +1,6 @@
 // Same-origin proxy to the Rust pdfkit-api (PRD §16): the browser calls
 // /api/pdfkit/v1/* and this forwards to $API_BASE_URL, avoiding CORS and hiding
-// the internal API URL. Forwards multipart bodies and streams responses back.
+// the internal API URL. Streams request and response bodies (no buffering).
 
 import { NextRequest } from "next/server";
 
@@ -12,16 +12,37 @@ async function forward(req: NextRequest, path: string[]): Promise<Response> {
   const target = `${API_BASE}/${path.join("/")}${req.nextUrl.search}`;
 
   const headers = new Headers(req.headers);
-  // Let fetch/undici set these for the upstream connection.
-  headers.delete("host");
-  headers.delete("content-length");
+  // fetch/undici manages connection + framing; and don't relay browser
+  // credentials across the trust boundary to the internal API.
+  for (const h of [
+    "host",
+    "content-length",
+    "content-encoding",
+    "transfer-encoding",
+    "cookie",
+    "authorization",
+  ]) {
+    headers.delete(h);
+  }
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  const upstream = await fetch(target, {
+  // Stream the request body through rather than buffering the whole upload.
+  const init: RequestInit & { duplex?: "half" } = {
     method: req.method,
     headers,
-    body: hasBody ? await req.arrayBuffer() : undefined,
-  });
+    body: hasBody ? req.body : undefined,
+  };
+  if (hasBody) init.duplex = "half";
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, init);
+  } catch (e) {
+    return Response.json(
+      { code: "upstream_unreachable", message: `cannot reach pdfkit-api: ${String(e)}` },
+      { status: 502 },
+    );
+  }
 
   // undici already decoded any content-encoding, so strip headers that would
   // misdescribe the body we stream back.

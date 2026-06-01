@@ -10,18 +10,6 @@ export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInp
   return <input className={cn(controlBase, className)} {...props} />;
 }
 
-export function Select({
-  className,
-  children,
-  ...props
-}: React.SelectHTMLAttributes<HTMLSelectElement>) {
-  return (
-    <select className={cn(controlBase, "cursor-pointer", className)} {...props}>
-      {children}
-    </select>
-  );
-}
-
 export function Textarea({ className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea
