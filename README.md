@@ -8,8 +8,8 @@ in one Cargo workspace with feature flags, so you compile in only what you need.
 > Deterministic and offline by default. No hosted-LLM calls anywhere except an
 > opt-in adapter where *you* supply the model client; OCR runs locally (ONNX).
 
-See [`CLAUDE.md`](./CLAUDE.md) for
-working conventions.
+See [`Prd.md`](./Prd.md) for the implementation plan and
+[`claude.md`](./claude.md) for working conventions.
 
 ## What you get
 
@@ -68,6 +68,129 @@ working conventions.
 > the OCR trait live in `pdfkit-core` so the in-core `extract` entry point can
 > use them without a dependency cycle. `pdfkit-render` / `pdfkit-ocr` re-export
 > those and add the heavy/optional backends.
+
+## Setup
+
+### Fresh checkout
+
+The default setup is intentionally small: Rust only. It builds and tests without
+PDFIUM, Tesseract, OCR models, hosted services, or network access after Cargo has
+resolved dependencies.
+
+```bash
+git clone https://github.com/equitylist/pdfkit.git
+cd pdfkit
+
+# rust-toolchain.toml selects stable, rustfmt, clippy, and wasm32-unknown-unknown.
+rustup show
+
+cargo build --workspace
+cargo test --workspace
+cargo test --workspace --no-default-features --features render-native
+```
+
+The MSRV checked by CI is Rust 1.82.0. The checked-in toolchain file uses the
+current stable channel for day-to-day work while CI also runs an explicit MSRV
+build.
+
+### CLI setup
+
+Run the CLI from the workspace:
+
+```bash
+cargo run -p pdfkit-cli -- --help
+cargo run -p pdfkit-cli -- fixtures/born-digital.pdf
+cargo run -p pdfkit-cli -- chunk fixtures/multi-heading.pdf --format md
+cargo run -p pdfkit-cli -- render fixtures/scanned.pdf --page 1 -o page1.png
+```
+
+Or install the local binary:
+
+```bash
+cargo install --path crates/pdfkit-cli
+pdfkit --help
+```
+
+The default CLI uses the pure-Rust native renderer. That path is useful for
+scanned PDFs and embedded raster images, but it does not render vector/text page
+content. Use the PDFIUM setup below for high-fidelity rendering.
+
+### PDFIUM rendering setup
+
+PDFIUM is optional and is never vendored. The helper script downloads a dynamic
+library into the pdfkit cache:
+
+```bash
+scripts/fetch-pdfium.sh
+cargo build -p pdfkit-render -p pdfkit-cli --features render-pdfium
+cargo run -p pdfkit-cli --features render-pdfium -- render document.pdf --page 1 --backend pdfium -o page1.png
+```
+
+Runtime lookup order is `$PDFKIT_PDFIUM_LIB`,
+`$PDFKIT_PDFIUM_DIR/lib/`, `~/.cache/pdfkit/pdfium/lib/`, then the system
+library path.
+
+### OCR setup
+
+The local `ocr-ocrs` backend is feature-gated and uses cached `.rten` models.
+The models are not stored in git:
+
+```bash
+scripts/fetch-ocr-models.sh
+cargo test -p pdfkit-ocr --features ocr-ocrs
+```
+
+Set `PDFKIT_OCR_MODELS` to use a custom model directory. Without it, models are
+stored in `${XDG_CACHE_HOME:-$HOME/.cache}/pdfkit/models`.
+
+The `ocr-tesseract` backend requires system Tesseract and Leptonica development
+libraries. On Ubuntu:
+
+```bash
+sudo apt-get install -y libtesseract-dev libleptonica-dev clang
+cargo build -p pdfkit-ocr --features ocr-tesseract
+cargo test -p pdfkit-ocr --features ocr-tesseract
+```
+
+On macOS, install the equivalent libraries with Homebrew:
+
+```bash
+brew install tesseract leptonica
+cargo build -p pdfkit-ocr --features ocr-tesseract
+```
+
+### WebAssembly setup
+
+The Rust wasm target is listed in `rust-toolchain.toml`; install `wasm-pack` for
+the browser/npm build:
+
+```bash
+cargo install wasm-pack
+wasm-pack build crates/pdfkit-wasm
+wasm-pack test --headless --firefox crates/pdfkit-wasm
+```
+
+The WASM surface accepts `Uint8Array` input and mirrors the core read API for
+text extraction, JSON extraction metadata, page count, and one-based page text.
+
+### Fuzzing setup
+
+Fuzzing is a detached workspace under `fuzz/` and needs nightly plus
+`cargo-fuzz`:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz build --target x86_64-unknown-linux-gnu parse
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu parse
+```
+
+For a short seeded smoke run, copy the fixtures into the fuzz corpus first:
+
+```bash
+mkdir -p fuzz/corpus/parse
+cp fixtures/*.pdf fuzz/corpus/parse/
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu parse -- -max_total_time=60 -timeout=10 -rss_limit_mb=4096
+```
 
 ## Quick start (CLI)
 
@@ -280,16 +403,35 @@ Apple Silicon, release build — indicative, not a guarantee:
 
 ## Commands
 
+Required checks before committing:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test --workspace --no-default-features --features render-native
+```
+
+Common development commands:
+
 ```bash
 cargo build --workspace
-cargo test --workspace
-cargo test --workspace --no-default-features --features render-native  # zero-native-dep path
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
+cargo run -p pdfkit-cli -- --help
+cargo run -p pdfkit-cli -- fixtures/born-digital.pdf --json
+cargo run -p pdfkit-cli -- chunk fixtures/multi-heading.pdf --format json
+cargo run -p pdfkit-cli -- render fixtures/scanned.pdf --page 1 -o page1.png
 cargo bench -p pdfkit-core
 wasm-pack build crates/pdfkit-wasm
-cargo run -p pdfkit-fixtures --bin write-fixtures                       # regenerate fixtures/
-cargo +nightly fuzz run parse                                          # fuzz (needs cargo-fuzz)
+cargo run -p pdfkit-fixtures --bin write-fixtures
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu parse
+```
+
+Optional backend checks:
+
+```bash
+cargo build -p pdfkit-render -p pdfkit-cli --features render-pdfium
+cargo test -p pdfkit-ocr --features ocr-ocrs
+cargo test -p pdfkit-ocr --features ocr-tesseract
 ```
 
 ## Provenance
