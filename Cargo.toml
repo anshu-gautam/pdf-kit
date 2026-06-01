@@ -11,6 +11,7 @@ members = [
     "crates/pdfkit-cli",
     "crates/pdfkit-wasm",
     "crates/pdfkit-fixtures",
+    "crates/pdfkit-api",
 ]
 # `cargo build` / `cargo test` without --workspace operate on these. The wasm
 # crate is excluded from the default set because it targets wasm32; build it
