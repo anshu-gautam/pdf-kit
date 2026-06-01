@@ -32,7 +32,9 @@ See [`claude.md`](./claude.md) for working conventions.
   behind feature flags.
 - **A separate write path** — create / merge / split / rotate / watermark / fill
   forms, which never flows through the extraction engine.
-- **Three surfaces from one tree** — native CLI, library (server), and WebAssembly.
+- **Surfaces from one source tree** — native CLI, embeddable library, and
+  WebAssembly, plus an optional self-hostable **HTTP API** (`pdfkit-api`) and a
+  **Next.js web UI** (`apps/web`).
 
 ## Design principles
 
@@ -60,6 +62,7 @@ See [`claude.md`](./claude.md) for working conventions.
 | `pdfkit-adapters` | Message content blocks, data URLs, figure image blocks, and the opt-in `llm-adapter`. |
 | `pdfkit-cli` | The `pdfkit` command-line tool. |
 | `pdfkit-wasm` | `wasm-bindgen` surface for the browser / npm. |
+| `pdfkit-api` | Self-hostable HTTP API (axum) over the library — extract / metadata / chunks / figures / render / edit + OpenAPI. A leaf binary, excluded from the default-members build so its async/network stack never enters the core. |
 | `pdfkit-fixtures` | Internal: deterministic synthetic test PDFs (not published). |
 | `fuzz/` | `cargo-fuzz` harness (a detached workspace; see [Robustness](#robustness)). |
 
@@ -324,6 +327,66 @@ let mut editor = PdfEditor::open("a.pdf")?;
 editor.merge(&PdfEditor::open("b.pdf")?)?;
 # Ok::<(), pdfkit_core::PdfError>(())
 ```
+
+## HTTP API & web UI
+
+An optional, self-hostable HTTP service (`pdfkit-api`, built with `axum`) wraps
+the library, and a Next.js reference UI (`apps/web`) drives it. Both are a
+separate track from the core library: the API is a leaf binary excluded from the
+default workspace build, so the async/network stack never enters the library's
+zero-dependency default (and the lib CI gates pass `--exclude pdfkit-api`).
+
+### Run the API
+
+```bash
+# extract / metadata / chunks / figures / edit work on the default pure-Rust build
+cargo run -p pdfkit-api                       # http://0.0.0.0:8080
+
+# /v1/render needs the PDFIUM backend (see "PDFIUM rendering setup" above):
+scripts/fetch-pdfium.sh
+cargo run -p pdfkit-api --features render-pdfium
+```
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /healthz` · `GET /version` | Liveness; build version + compiled feature flags |
+| `POST /v1/extract` | Text + rendered page images (multipart `file` + JSON `options`) |
+| `POST /v1/metadata` | Page count, info-dict, outline, per-page links |
+| `POST /v1/chunks` | RAG chunks as JSON or Markdown |
+| `POST /v1/figures` | Detected figures + captions |
+| `POST /v1/render` | Page → PNG (requires `render-pdfium`; otherwise `501`) |
+| `POST /v1/edit/{merge,split,rotate,watermark,fill}` | Write path (split returns a zip) |
+| `GET /openapi.json` · `/docs` | OpenAPI 3.1 schema + Swagger UI |
+
+Uploads are PDF-validated, size-capped, and run on a worker thread; `PdfError`
+maps to typed HTTP codes (400 / 422 / 413 / 502). Config via env:
+`PDFKIT_API_ADDR` (default `0.0.0.0:8080`), `PDFKIT_MAX_BODY_BYTES` (default
+50 MB), `PDFKIT_REQUEST_TIMEOUT_SECS` (default 60), `PDFKIT_ALLOWED_ORIGINS`
+(CORS allowlist), `PDFKIT_PDFIUM_LIB`. A `Dockerfile` (built with
+`render-pdfium` and the PDFIUM library bundled) is in `crates/pdfkit-api/`.
+
+```bash
+# example: extract text
+curl -F file=@fixtures/born-digital.pdf -F 'options={"mode":"text"}' \
+  http://127.0.0.1:8080/v1/extract
+```
+
+### Run the web UI
+
+`apps/web` is a Next.js 16 app (App Router, TypeScript, Tailwind v4) — a Node
+project outside the Cargo workspace; needs Node 20.9+.
+
+```bash
+cd apps/web
+cp .env.example .env.local     # set API_BASE_URL (defaults to http://127.0.0.1:8080)
+npm install
+npm run dev                    # http://localhost:3000
+```
+
+The browser calls a same-origin proxy at `/api/pdfkit/*` that forwards to
+`API_BASE_URL` (so there's no CORS to configure); set `NEXT_PUBLIC_API_BASE_URL`
+to call the Rust API directly instead. Pages: `/extract`, `/chunks`, `/render`,
+`/edit`, `/docs`, with a light/dark theme toggle.
 
 ## Feature flags
 
