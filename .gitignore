@@ -8,6 +8,9 @@
 .idea/
 .vscode/
 
+# Local/private planning notes
+Prd.md
+
 # Local OCR model cache (downloaded by setup script, never vendored — CLAUDE.md)
 /.cache/
 /models/

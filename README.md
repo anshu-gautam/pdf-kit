@@ -8,8 +8,7 @@ in one Cargo workspace with feature flags, so you compile in only what you need.
 > Deterministic and offline by default. No hosted-LLM calls anywhere except an
 > opt-in adapter where *you* supply the model client; OCR runs locally (ONNX).
 
-See [`Prd.md`](./Prd.md) for the implementation plan and
-[`claude.md`](./claude.md) for working conventions.
+See [`claude.md`](./claude.md) for working conventions.
 
 ## What you get
 
