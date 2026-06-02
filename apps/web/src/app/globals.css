@@ -52,6 +52,16 @@
   --shadow-sm: 0 1px 3px 0 rgb(16 24 40 / 0.08), 0 1px 2px -1px rgb(16 24 40 / 0.06);
   --shadow-md: 0 4px 8px -2px rgb(16 24 40 / 0.08), 0 2px 4px -2px rgb(16 24 40 / 0.06);
   --shadow-lg: 0 4px 6px -1px rgb(16 24 40 / 0.08), 0 2px 4px -2px rgb(16 24 40 / 0.06), 0 12px 24px -8px rgb(16 24 40 / 0.1);
+  --shadow-xl: 0 24px 48px -12px rgb(16 24 40 / 0.18);
+
+  /* Terminal palette — always dark (code wells, hero terminal) */
+  --term-bg: #0c1116;
+  --term-bar: #161c23;
+  --term-border: #1f2730;
+  --term-fg: #c9d4e0;
+  --term-dim: #7e8b9a; /* AA (≥4.5:1) on both --term-bg variants */
+  --term-green: #4ec99a;
+  --term-amber: #e3b341;
 
   /* Motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -97,6 +107,11 @@
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --shadow-md: 0 4px 12px -4px rgb(0 0 0 / 0.5);
   --shadow-lg: 0 8px 24px -8px rgb(0 0 0 / 0.55);
+  --shadow-xl: 0 30px 60px -20px rgb(0 0 0 / 0.7);
+
+  --term-bg: #08090b;
+  --term-bar: #121519;
+  --term-border: rgb(255 255 255 / 0.08);
 }
 
 /* ---------- TAILWIND v4 THEME ALIASES ---------- */
@@ -140,6 +155,7 @@
   --shadow-sm: var(--shadow-sm);
   --shadow-md: var(--shadow-md);
   --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
 
   --ease-out: var(--ease-out);
   --ease-standard: var(--ease-standard);
@@ -151,6 +167,9 @@
 
 /* ---------- BASE ---------- */
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
   body {
     background: var(--background);
     color: var(--foreground);

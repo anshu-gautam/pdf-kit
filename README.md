@@ -80,8 +80,8 @@ PDFIUM, Tesseract, OCR models, hosted services, or network access after Cargo ha
 resolved dependencies.
 
 ```bash
-git clone https://github.com/anshu-gautam/pdfkit.git
-cd pdfkit
+git clone https://github.com/anshu-gautam/pdf-kit.git
+cd pdf-kit
 
 # rust-toolchain.toml selects stable, rustfmt, clippy, and wasm32-unknown-unknown.
 rustup show

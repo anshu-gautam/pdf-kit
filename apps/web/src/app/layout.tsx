@@ -1,15 +1,18 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
-import { Shell } from "@/components/shell";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "pdfkit — PDF toolkit",
-  description: "Read-first PDF extraction, chunking, rendering, and editing.",
+  title: {
+    default: "pdfkit — a from-scratch, AI-oriented PDF toolkit in Rust",
+    template: "%s — pdfkit",
+  },
+  description:
+    "Read-first PDF extraction (text → OCR → render), RAG-ready chunks with provenance on every one, and a separate edit path. Deterministic and offline by default.",
 };
 
 // Runs before paint to set the theme class, avoiding a flash of the wrong theme.
@@ -24,7 +27,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     >
       <body>
         <script dangerouslySetInnerHTML={{ __html: themeInit }} />
-        <Shell>{children}</Shell>
+        {children}
         <Toaster
           position="top-right"
           toastOptions={{
