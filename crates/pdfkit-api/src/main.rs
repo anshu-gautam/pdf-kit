@@ -39,6 +39,7 @@ use utoipa::OpenApi;
         handlers::edit_rotate,
         handlers::edit_watermark,
         handlers::edit_fill,
+        handlers::convert_docx,
     ),
     components(schemas(
         dto::ApiError,
@@ -57,6 +58,7 @@ use utoipa::OpenApi;
     tags(
         (name = "read", description = "Read endpoints (extract, metadata, chunks, figures, render)"),
         (name = "edit", description = "Write endpoints (merge, split, rotate, watermark, fill)"),
+        (name = "convert", description = "Conversion endpoints (Word .docx → PDF)"),
         (name = "meta", description = "Health and version")
     )
 )]
@@ -139,6 +141,7 @@ fn app() -> Router {
         .route("/v1/edit/rotate", post(handlers::edit_rotate))
         .route("/v1/edit/watermark", post(handlers::edit_watermark))
         .route("/v1/edit/fill", post(handlers::edit_fill))
+        .route("/v1/convert/docx-to-pdf", post(handlers::convert_docx))
         .layer(DefaultBodyLimit::max(max_body))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -163,6 +166,7 @@ async fn version() -> Json<Value> {
         "features": {
             "render_pdfium": cfg!(feature = "render-pdfium"),
             "ocr": cfg!(feature = "ocr"),
+            "docx": cfg!(feature = "docx"),
         },
     }))
 }
@@ -229,5 +233,6 @@ mod tests {
         assert!(v["version"].is_string());
         assert!(v["features"]["render_pdfium"].is_boolean());
         assert!(v["features"]["ocr"].is_boolean());
+        assert!(v["features"]["docx"].is_boolean());
     }
 }

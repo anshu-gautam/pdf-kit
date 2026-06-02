@@ -177,6 +177,16 @@ pub fn run_fill(bytes: Vec<u8>, fields: HashMap<String, String>) -> Result<Vec<u
     save_editor(&editor)
 }
 
+// ---------------------------------------------------------------------------
+// Convert path
+// ---------------------------------------------------------------------------
+
+/// Convert a Word `.docx` document to PDF bytes (pure-Rust, offline).
+#[cfg(feature = "docx")]
+pub fn run_docx_to_pdf(bytes: Vec<u8>) -> Result<Vec<u8>, PdfError> {
+    pdfkit_docx::docx_to_pdf(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +203,27 @@ mod tests {
         PdfEditor::open(pdf.to_vec())
             .expect("reopen output")
             .page_count()
+    }
+
+    #[cfg(feature = "docx")]
+    #[test]
+    fn docx_to_pdf_produces_a_pdf() {
+        use std::io::{Cursor, Write};
+        let doc = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body><w:p><w:r><w:t>Service round trip</w:t></w:r></w:p></w:body></w:document>"#;
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("word/document.xml", opts).unwrap();
+            zip.write_all(doc.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let pdf = run_docx_to_pdf(buf.into_inner()).expect("docx to pdf");
+        assert!(pdf.starts_with(b"%PDF"));
+        assert_eq!(page_count(&pdf), 1);
     }
 
     #[test]

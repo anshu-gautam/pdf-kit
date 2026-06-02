@@ -9,7 +9,12 @@ description = "Self-hostable HTTP API over the pdfkit library (PRD §13). A leaf
 publish = false
 
 [features]
-default = []
+# docx → PDF conversion is pure-Rust and offline, so (unlike the native/heavy
+# features below) it ships in the default build; drop it with
+# --no-default-features for a minimal API.
+default = ["docx"]
+# Word (.docx) → PDF conversion for /v1/convert/docx-to-pdf (pure-Rust).
+docx = ["dep:pdfkit-docx"]
 # High-fidelity rendering for /v1/render (PDFIUM native backend; PRD §13.2).
 # render-native gives us encode_png; render-pdfium adds the PdfiumRenderer.
 render-pdfium = ["dep:pdfkit-render", "pdfkit-render/render-native", "pdfkit-render/render-pdfium"]
@@ -22,6 +27,7 @@ ocr = ["dep:pdfkit-ocr", "pdfkit-ocr/ocr-ocrs"]
 pdfkit-core = { path = "../pdfkit-core" }
 pdfkit-chunk = { path = "../pdfkit-chunk" }
 pdfkit-edit = { path = "../pdfkit-edit" }
+pdfkit-docx = { path = "../pdfkit-docx", optional = true }
 pdfkit-render = { path = "../pdfkit-render", optional = true }
 pdfkit-ocr = { path = "../pdfkit-ocr", optional = true }
 axum = { version = "0.8", features = ["multipart"] }

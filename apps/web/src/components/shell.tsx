@@ -2,7 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Code2, FileText, Image as ImageIcon, Layers, PencilRuler, type LucideIcon } from "lucide-react";
+import {
+  Code2,
+  FileText,
+  FileType2,
+  Image as ImageIcon,
+  Layers,
+  PencilRuler,
+  type LucideIcon,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ThemeToggle } from "@/components/theme-toggle";
 
@@ -16,6 +24,7 @@ const groups: ReadonlyArray<{ label: string; items: ReadonlyArray<NavItem> }> = 
       { href: "/chunks", label: "Chunks", icon: Layers },
       { href: "/render", label: "Render", icon: ImageIcon },
       { href: "/edit", label: "Edit", icon: PencilRuler },
+      { href: "/convert", label: "Word → PDF", icon: FileType2 },
     ],
   },
   {

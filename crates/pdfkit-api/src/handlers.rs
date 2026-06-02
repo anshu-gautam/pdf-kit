@@ -410,6 +410,98 @@ pub async fn edit_fill(mp: Multipart) -> Result<Response, ApiErr> {
     Ok(pdf_response(pdf))
 }
 
+// ---------------------------------------------------------------------------
+// Convert path
+// ---------------------------------------------------------------------------
+
+/// Reject obvious non-.docx uploads: every OPC/zip package begins with the local
+/// file header `PK\x03\x04`. Deeper validation happens in the converter.
+#[cfg(feature = "docx")]
+fn validate_docx(bytes: &[u8]) -> Result<(), ApiErr> {
+    if bytes.starts_with(b"PK\x03\x04") {
+        Ok(())
+    } else {
+        Err(ApiErr::bad_request(
+            "not_a_docx",
+            "input does not look like a .docx file (no zip header)",
+        ))
+    }
+}
+
+#[cfg(feature = "docx")]
+impl Upload {
+    /// Exactly one `.docx` file part, validated.
+    fn one_docx(&mut self) -> Result<Vec<u8>, ApiErr> {
+        if self.files.len() != 1 {
+            return Err(ApiErr::bad_request(
+                "expected_one_file",
+                format!("expected exactly one `file` part, got {}", self.files.len()),
+            ));
+        }
+        let bytes = self.files.remove(0);
+        validate_docx(&bytes)?;
+        Ok(bytes)
+    }
+}
+
+#[cfg(feature = "docx")]
+#[utoipa::path(
+    post,
+    path = "/v1/convert/docx-to-pdf",
+    tag = "convert",
+    request_body(content_type = "multipart/form-data", description = "Parts: `file` (a Word .docx)"),
+    responses(
+        (status = 200, content_type = "application/pdf", description = "Converted PDF"),
+        (status = 400, body = ApiError, description = "Missing file or input is not a .docx")
+    )
+)]
+pub async fn convert_docx(mp: Multipart) -> Result<Response, ApiErr> {
+    let mut up = collect(mp).await?;
+    let bytes = up.one_docx()?;
+    // Run inline (not via `blocking`) so a docx parse failure keeps its
+    // descriptive cause and a docx-specific 400, instead of collapsing to the
+    // generic PDF-flavored "malformed_pdf" message.
+    let _permit = CPU_LIMIT
+        .acquire()
+        .await
+        .map_err(|_| ApiErr::internal("concurrency limiter closed"))?;
+    let pdf = match tokio::task::spawn_blocking(move || service::run_docx_to_pdf(bytes)).await {
+        Ok(Ok(pdf)) => pdf,
+        Ok(Err(e)) => return Err(docx_err(e)),
+        Err(e) => return Err(ApiErr::internal(format!("worker join error: {e}"))),
+    };
+    Ok(pdf_response(pdf))
+}
+
+/// Map a converter error to an API error: a malformed/unsupported `.docx` is a
+/// 400 carrying the descriptive cause (rather than the PDF-flavored generic
+/// `Format` message); other variants use the standard mapping.
+#[cfg(feature = "docx")]
+fn docx_err(e: pdfkit_core::PdfError) -> ApiErr {
+    match e {
+        pdfkit_core::PdfError::Format(src) => {
+            let detail = src
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "input is not a readable Word .docx document".to_string());
+            ApiErr::bad_request("invalid_docx", detail)
+        }
+        other => ApiErr::from(other),
+    }
+}
+
+#[cfg(not(feature = "docx"))]
+#[utoipa::path(
+    post,
+    path = "/v1/convert/docx-to-pdf",
+    tag = "convert",
+    responses((status = 501, body = ApiError, description = "This build has no docx feature"))
+)]
+pub async fn convert_docx() -> Result<Response, ApiErr> {
+    Err(ApiErr::not_implemented(
+        "docx conversion requires a build with --features docx",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

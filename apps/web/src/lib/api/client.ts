@@ -127,3 +127,8 @@ export function editWatermark(
 export function editFill(file: File, fields: Record<string, string>): Promise<Blob> {
   return postBlob("/v1/edit/fill", form(file, { fields }));
 }
+
+/** Convert a Word .docx document to a PDF (returned as a Blob). */
+export function convertDocxToPdf(file: File): Promise<Blob> {
+  return postBlob("/v1/convert/docx-to-pdf", form(file));
+}

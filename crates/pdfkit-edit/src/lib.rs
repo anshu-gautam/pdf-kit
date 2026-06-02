@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use lopdf::content::{Content, Operation};
-use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, SaveOptions, Stream};
+use lopdf::{
+    dictionary, Dictionary, Document, Object, ObjectId, SaveOptions, Stream, StringFormat,
+};
 
 use pdfkit_core::{PdfError, PdfInput};
 
@@ -45,16 +47,6 @@ pub enum FontFamily {
     Courier,
 }
 
-impl FontFamily {
-    fn base_font(self) -> &'static str {
-        match self {
-            FontFamily::Helvetica => "Helvetica",
-            FontFamily::TimesRoman => "Times-Roman",
-            FontFamily::Courier => "Courier",
-        }
-    }
-}
-
 /// Font selection for [`PdfBuilder::draw_text`].
 #[derive(Debug, Clone, Copy)]
 pub struct FontSpec {
@@ -62,6 +54,10 @@ pub struct FontSpec {
     pub family: FontFamily,
     /// Size in points.
     pub size: f32,
+    /// Bold weight (selects the `-Bold` standard-14 variant).
+    pub bold: bool,
+    /// Italic/oblique style (selects the `-Italic` / `-Oblique` variant).
+    pub italic: bool,
 }
 
 impl Default for FontSpec {
@@ -69,8 +65,79 @@ impl Default for FontSpec {
         FontSpec {
             family: FontFamily::Helvetica,
             size: 12.0,
+            bold: false,
+            italic: false,
         }
     }
+}
+
+impl FontSpec {
+    /// The standard-14 BaseFont name for this family + style combination.
+    fn base_font(self) -> &'static str {
+        use FontFamily::*;
+        match (self.family, self.bold, self.italic) {
+            (Helvetica, false, false) => "Helvetica",
+            (Helvetica, true, false) => "Helvetica-Bold",
+            (Helvetica, false, true) => "Helvetica-Oblique",
+            (Helvetica, true, true) => "Helvetica-BoldOblique",
+            (TimesRoman, false, false) => "Times-Roman",
+            (TimesRoman, true, false) => "Times-Bold",
+            (TimesRoman, false, true) => "Times-Italic",
+            (TimesRoman, true, true) => "Times-BoldItalic",
+            (Courier, false, false) => "Courier",
+            (Courier, true, false) => "Courier-Bold",
+            (Courier, false, true) => "Courier-Oblique",
+            (Courier, true, true) => "Courier-BoldOblique",
+        }
+    }
+}
+
+/// Encode a `str` as WinAnsi (CP1252) bytes for a PDF literal string. ASCII is
+/// passed through; the Latin-1 upper range maps 1:1; a handful of common CP1252
+/// punctuation (smart quotes, dashes, ellipsis, bullet, €, ™) is mapped to its
+/// byte; anything else becomes `?`. Paired with `/Encoding /WinAnsiEncoding` on
+/// the font, this renders typical Word/office text correctly.
+fn encode_winansi(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for ch in s.chars() {
+        let byte = match ch {
+            '\u{20}'..='\u{7e}' => ch as u8,
+            // Latin-1 supplement maps 1:1 onto WinAnsi 0xA0..=0xFF.
+            '\u{a0}'..='\u{ff}' => ch as u8,
+            // CP1252 punctuation block (0x80..=0x9F).
+            '\u{20ac}' => 0x80, // €
+            '\u{201a}' => 0x82, // ‚
+            '\u{0192}' => 0x83, // ƒ
+            '\u{201e}' => 0x84, // „
+            '\u{2026}' => 0x85, // …
+            '\u{2020}' => 0x86, // †
+            '\u{2021}' => 0x87, // ‡
+            '\u{02c6}' => 0x88, // ˆ
+            '\u{2030}' => 0x89, // ‰
+            '\u{0160}' => 0x8a, // Š
+            '\u{2039}' => 0x8b, // ‹
+            '\u{0152}' => 0x8c, // Œ
+            '\u{017d}' => 0x8e, // Ž
+            '\u{2018}' => 0x91, // ‘
+            '\u{2019}' => 0x92, // ’
+            '\u{201c}' => 0x93, // “
+            '\u{201d}' => 0x94, // ”
+            '\u{2022}' => 0x95, // •
+            '\u{2013}' => 0x96, // –
+            '\u{2014}' => 0x97, // —
+            '\u{02dc}' => 0x98, // ˜
+            '\u{2122}' => 0x99, // ™
+            '\u{0161}' => 0x9a, // š
+            '\u{203a}' => 0x9b, // ›
+            '\u{0153}' => 0x9c, // œ
+            '\u{017e}' => 0x9e, // ž
+            '\u{0178}' => 0x9f, // Ÿ
+            '\t' => b' ',
+            _ => b'?',
+        };
+        out.push(byte);
+    }
+    out
 }
 
 /// Opaque handle to a page being authored.
@@ -133,7 +200,7 @@ impl PdfBuilder {
         let Some(p) = self.pages.get_mut(page.0) else {
             return;
         };
-        let name = p.font_name(font.family.base_font());
+        let name = p.font_name(font.base_font());
         p.ops.push(Operation::new("BT", vec![]));
         p.ops.push(Operation::new(
             "Tf",
@@ -150,9 +217,37 @@ impl PdfBuilder {
                 at.1.into(),
             ],
         ));
-        p.ops
-            .push(Operation::new("Tj", vec![Object::string_literal(text)]));
+        p.ops.push(Operation::new(
+            "Tj",
+            vec![Object::String(encode_winansi(text), StringFormat::Literal)],
+        ));
         p.ops.push(Operation::new("ET", vec![]));
+    }
+
+    /// Stroke a straight line from `from` to `to` (points, origin bottom-left)
+    /// at `width` pt in `gray` (0.0 black ..= 1.0 white). Used for rules and
+    /// simple table borders on authored pages.
+    pub fn draw_line(
+        &mut self,
+        page: PageRef,
+        from: (f32, f32),
+        to: (f32, f32),
+        width: f32,
+        gray: f32,
+    ) {
+        let Some(p) = self.pages.get_mut(page.0) else {
+            return;
+        };
+        p.ops.push(Operation::new("q", vec![]));
+        p.ops.push(Operation::new("w", vec![width.into()]));
+        p.ops
+            .push(Operation::new("G", vec![gray.clamp(0.0, 1.0).into()]));
+        p.ops
+            .push(Operation::new("m", vec![from.0.into(), from.1.into()]));
+        p.ops
+            .push(Operation::new("l", vec![to.0.into(), to.1.into()]));
+        p.ops.push(Operation::new("S", vec![]));
+        p.ops.push(Operation::new("Q", vec![]));
     }
 
     /// Place a PNG image into `rect` (`[x0, y0, x1, y1]` in points).
@@ -212,6 +307,7 @@ impl PdfBuilder {
                         "Type" => "Font",
                         "Subtype" => "Type1",
                         "BaseFont" => *base,
+                        "Encoding" => "WinAnsiEncoding",
                     });
                     fonts.set(name.as_str(), font_id);
                 }

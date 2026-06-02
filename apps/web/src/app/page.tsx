@@ -583,8 +583,8 @@ export default function Home() {
               <h3>Write</h3>
               <Link href="/edit">Create &amp; merge</Link>
               <Link href="/edit">Split &amp; rotate</Link>
-              <Link href="/edit">Watermark</Link>
               <Link href="/edit">Fill forms</Link>
+              <Link href="/convert">Word → PDF</Link>
             </div>
             <div className="foot-col">
               <h3>Project</h3>

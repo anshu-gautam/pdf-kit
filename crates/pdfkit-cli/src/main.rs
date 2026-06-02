@@ -69,6 +69,19 @@ enum Command {
     Structure(DocArgs),
     /// Print image/figure regions (bbox + caption) per page as JSON.
     Figures(DocArgs),
+    /// Convert a Word .docx document to PDF (pure-Rust, offline).
+    Convert(ConvertArgs),
+}
+
+/// Args for `convert` (docx → PDF).
+#[derive(Parser, Debug)]
+struct ConvertArgs {
+    /// Word .docx file to convert (or `-` for stdin).
+    file: String,
+
+    /// Output PDF path (defaults to stdout).
+    #[arg(long, short = 'o', value_name = "PATH")]
+    out: Option<PathBuf>,
 }
 
 /// Args shared by the read-only inspection subcommands.
@@ -218,6 +231,7 @@ fn run(mut cli: Cli) -> Result<(), CliError> {
         Some(Command::Outline(args)) => return run_outline(args),
         Some(Command::Structure(args)) => return run_structure(args),
         Some(Command::Figures(args)) => return run_figures(args),
+        Some(Command::Convert(args)) => return run_convert(args),
         None => {}
     }
     let file = cli
@@ -402,6 +416,20 @@ fn run_render(args: RenderArgs) -> Result<(), CliError> {
         None => {
             let stdout = io::stdout();
             stdout.lock().write_all(&png)?;
+        }
+    }
+    Ok(())
+}
+
+/// Convert a Word `.docx` to PDF and write it to `--out` or stdout.
+fn run_convert(args: ConvertArgs) -> Result<(), CliError> {
+    let docx = read_bytes(&args.file)?;
+    let pdf = pdfkit_docx::docx_to_pdf(&docx)?;
+    match args.out {
+        Some(path) => fs::write(&path, &pdf)?,
+        None => {
+            let stdout = io::stdout();
+            stdout.lock().write_all(&pdf)?;
         }
     }
     Ok(())

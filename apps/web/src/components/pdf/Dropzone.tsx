@@ -11,12 +11,22 @@ export function Dropzone({
   multiple = false,
   maxBytes = DEFAULT_MAX_BYTES,
   className,
+  accept = "application/pdf",
+  noun = "PDF",
+  nounPlural,
 }: {
   onFiles: (files: File[]) => void;
   multiple?: boolean;
   maxBytes?: number;
   className?: string;
+  /** `accept` attribute for the file input (defaults to PDFs). */
+  accept?: string;
+  /** Singular noun shown in the prompt (e.g. "PDF", "Word document"). */
+  noun?: string;
+  /** Plural noun; defaults to `${noun}s`. */
+  nounPlural?: string;
 }) {
+  const plural = nounPlural ?? `${noun}s`;
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -43,7 +53,7 @@ export function Dropzone({
       <div
         role="button"
         tabIndex={0}
-        aria-label="Upload a PDF"
+        aria-label={`Upload ${multiple ? plural : `a ${noun}`}`}
         onClick={() => inputRef.current?.click()}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -77,18 +87,19 @@ export function Dropzone({
               "Drop to upload"
             ) : (
               <>
-                Drop {multiple ? "PDFs" : "a PDF"} here, or <span className="text-accent-text">browse</span>
+                Drop {multiple ? plural : `a ${noun}`} here, or{" "}
+                <span className="text-accent-text">browse</span>
               </>
             )}
           </p>
           <p className="text-xs text-muted-foreground">
-            PDF up to {maxMb} MB{multiple ? " · multiple allowed" : ""}
+            {noun} up to {maxMb} MB{multiple ? " · multiple allowed" : ""}
           </p>
         </div>
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf"
+          accept={accept}
           multiple={multiple}
           className="hidden"
           onChange={(e) => handle(e.target.files)}

@@ -1,0 +1,22 @@
+[package]
+name = "pdfkit-docx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "pdfkit docx → PDF conversion (pure-Rust): paragraphs, headings, lists, tables, and inline images rendered via the pdfkit-edit create path."
+
+[dependencies]
+pdfkit-core = { path = "../pdfkit-core", default-features = false }
+pdfkit-edit = { path = "../pdfkit-edit" }
+# Pure-Rust deflate (via flate2/miniz_oxide) — no native zlib. Read side only.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pure-Rust read-only XML DOM (MIT/Apache-2.0).
+roxmltree = "0.20"
+# Decode embedded docx images (png/jpeg) and re-encode to PNG for placement.
+image = { workspace = true, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+pdfkit-core = { path = "../pdfkit-core" }
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -5,9 +5,21 @@ import { Dropzone } from "./Dropzone";
 import { Button } from "@/components/ui";
 
 /** Dropzone when empty; a compact file chip once a file is chosen. */
-export function Uploader({ file, onFile }: { file: File | null; onFile: (file: File | null) => void }) {
+export function Uploader({
+  file,
+  onFile,
+  accept,
+  noun,
+}: {
+  file: File | null;
+  onFile: (file: File | null) => void;
+  /** `accept` attribute forwarded to the Dropzone (defaults to PDFs). */
+  accept?: string;
+  /** Singular noun forwarded to the Dropzone (e.g. "Word document"). */
+  noun?: string;
+}) {
   if (!file) {
-    return <Dropzone onFiles={(files) => onFile(files[0] ?? null)} />;
+    return <Dropzone onFiles={(files) => onFile(files[0] ?? null)} accept={accept} noun={noun} />;
   }
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-subtle px-3 py-2">
