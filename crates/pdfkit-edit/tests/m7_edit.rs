@@ -166,6 +166,58 @@ fn watermark_adds_visible_text() {
 }
 
 #[test]
+fn watermark_preserves_original_page_content() {
+    // born-digital inherits its /Resources from the page tree. Watermarking must
+    // not shadow them with a fresh dict holding only the watermark font, or the
+    // original text loses its font and renders blank (regression guard).
+    let mut editor = PdfEditor::open(pdfkit_fixtures::born_digital()).expect("open");
+    editor
+        .watermark("DRAFT", WatermarkOptions::default())
+        .expect("watermark");
+    let mut out = Vec::new();
+    editor.save(&mut out).expect("save");
+
+    // The original text must still be readable, alongside the watermark.
+    let text = open_text(&out);
+    assert!(
+        text.contains("Hello, pdfkit!"),
+        "original text lost: {text:?}"
+    );
+    assert!(text.contains("DRAFT"), "watermark text missing: {text:?}");
+
+    // The page's resolved /Font resources must carry the original font(s) in
+    // addition to the watermark font — not just the watermark.
+    let doc = lopdf::Document::load_mem(&out).expect("reopen");
+    let (_, page_id) = doc.get_pages().into_iter().next().expect("a page");
+    let resources_id = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let fonts = doc
+        .get_dictionary(resources_id)
+        .unwrap()
+        .get(b"Font")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let keys: Vec<String> = fonts
+        .iter()
+        .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+        .collect();
+    assert!(
+        keys.iter().any(|k| k == "PDFKitWM"),
+        "watermark font missing: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k != "PDFKitWM"),
+        "original font dropped: {keys:?}"
+    );
+}
+
+#[test]
 fn fill_form_sets_field_value() {
     let mut editor = PdfEditor::open(pdfkit_fixtures::forms()).expect("open");
     assert_eq!(

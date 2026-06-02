@@ -16,3 +16,4 @@ image = { workspace = true, features = ["png"] }
 pdfkit-fixtures = { path = "../pdfkit-fixtures" }
 pdfkit-core = { path = "../pdfkit-core" }
 image = { workspace = true, features = ["png"] }
+lopdf = { workspace = true }

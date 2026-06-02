@@ -683,12 +683,44 @@ impl PdfEditor {
                 return Ok(id);
             }
         }
-        // No resources at all: create an empty one.
-        let id = self.doc.add_object(Dictionary::new());
+        // No own /Resources: they're inherited from an ancestor page-tree node.
+        // Clone the inherited dict onto the page so the original content's fonts
+        // and XObjects survive — otherwise attaching our own (otherwise empty)
+        // Resources shadows the inherited ones and the page loses its fonts.
+        let dict = self.inherited_resources(page_id).unwrap_or_default();
+        let id = self.doc.add_object(dict);
         if let Ok(page) = self.doc.get_dictionary_mut(page_id) {
             page.set("Resources", id);
         }
         Ok(id)
+    }
+
+    /// Walk the `/Parent` chain to find `/Resources` inherited by a page, and
+    /// return a clone (its font/XObject entries are references, so they stay
+    /// valid). Bounded against cyclic parent links.
+    fn inherited_resources(&self, page_id: ObjectId) -> Option<Dictionary> {
+        let mut current = self
+            .doc
+            .get_dictionary(page_id)
+            .ok()?
+            .get(b"Parent")
+            .and_then(Object::as_reference)
+            .ok();
+        for _ in 0..64 {
+            let pid = current?;
+            let node = self.doc.get_dictionary(pid).ok()?;
+            if let Ok(res) = node.get(b"Resources") {
+                if let Ok(rid) = res.as_reference() {
+                    if let Ok(d) = self.doc.get_dictionary(rid) {
+                        return Some(d.clone());
+                    }
+                } else if let Ok(d) = res.as_dict() {
+                    return Some(d.clone());
+                }
+            }
+            current = node.get(b"Parent").and_then(Object::as_reference).ok();
+        }
+        None
     }
 
     /// Append a content stream object to a page's Contents.
